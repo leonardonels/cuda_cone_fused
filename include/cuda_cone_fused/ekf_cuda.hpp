@@ -62,11 +62,10 @@ public:
      * @param R           [in] host, (2m)*(2m) col-major. Block-diag meas. noise.
      * @param nu          [in] host, 2m. Stacked (wrapped) innovation.
      * @param two_m       2*m.
-     * @param freeze_pose if true, zero the pose rows of K (lap-1 pose freeze).
      * @return false on any CUDA/cuBLAS/cuSOLVER failure (state left unchanged).
      */
     bool batchUpdateFullState(int na, const float* H, const float* R,
-                              const float* nu, int two_m, bool freeze_pose);
+                              const float* nu, int two_m);
 
     /* ---- predict / motion (setPose) ------------------------------------- */
 

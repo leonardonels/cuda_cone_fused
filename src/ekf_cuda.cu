@@ -1,4 +1,4 @@
-#include <cone_fused/ekf_cuda.hpp>
+#include <cuda_cone_fused/ekf_cuda.hpp>
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -212,8 +212,7 @@ EkfCudaBackend::~EkfCudaBackend() {
  *   P     -= K HP       (gemm, op(K^T)=T)
  * ------------------------------------------------------------------------- */
 bool EkfCudaBackend::batchUpdateFullState(int na, const float* H, const float* R,
-                                          const float* nu, int two_m,
-                                          bool freeze_pose) {
+                                          const float* nu, int two_m) {
     if (!p_->good) return false;
     if (two_m > p_->cap_two_m) {
         if (!p_->alloc_scratch(two_m)) return false;
@@ -245,11 +244,6 @@ bool EkfCudaBackend::batchUpdateFullState(int na, const float* H, const float* R
                         p_->dwork(), p_->dipiv(), p_->dinfo()), "getrf S");
     SK(cusolverDnSgetrs(p_->solver, CUBLAS_OP_N, two_m, na, p_->dS(), two_m,
                         p_->dipiv(), p_->dKt(), two_m, p_->dinfo()), "getrs S");
-
-    /* freeze pose: zero K rows 0..2  ==  K^T columns 0..2  (first 3*2m floats) */
-    if (freeze_pose) {
-        CK(cudaMemset(p_->dKt(), 0, (size_t)3 * two_m * sizeof(float)), "freeze pose");
-    }
 
     /* x_head += K * nu       y(na) = (K^T)^T * nu */
     BK(cublasSgemv(p_->blas, CUBLAS_OP_T, two_m, na, &one,

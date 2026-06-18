@@ -1,13 +1,15 @@
-#include <cone_fused/cone_fused.hpp>
+#include <cuda_cone_fused/cuda_cone_fused.hpp>
 
-ConeFusion::ConeFusion() : rclcpp::Node("cone_fused_node") {
+ConeFusion::ConeFusion() : rclcpp::Node("cuda_cone_fused_node") {
   /* Load node parameters */
   this->loadParameters();
 
   /* Create publisher */
   this->odom_pub = this->create_publisher<nav_msgs::msg::Odometry>(this->output_odom_topic, 1);
   this->conesPositionsMarkerPub = this->create_publisher<visualization_msgs::msg::Marker>(this->mapped_cones_topic, 1);
+#ifdef CONE_FUSED_DEBUG
   this->inputConesDebugPub = this->create_publisher<visualization_msgs::msg::Marker>(this->input_cones_debug_topic, 1);
+#endif
 
   /* Create subscriptions */
   this->cones_sub = this->create_subscription<visualization_msgs::msg::Marker>(this->cones_topic, 100,std::bind(&ConeFusion::conesCallback, this, std::placeholders::_1));
@@ -26,10 +28,8 @@ ConeFusion::ConeFusion() : rclcpp::Node("cone_fused_node") {
   this->act_orientation.set__z(0.0);
 
   /* Create EKF SLAM filter object */
-  this->ekf_odom = std::make_shared<EKFOdom>(this->proc_noise, this->meas_noise, this->motion_noise, this->min_new_cone_distance, this->eigen_threads);
-  this->ekf_odom->setBatchUpdate(this->batch_cone_update);
+  this->ekf_odom = std::make_shared<EKFOdom>(this->proc_noise, this->motion_noise, this->min_new_cone_distance, this->eigen_threads);
   this->ekf_odom->setFreezeMap(this->freeze_map);
-  this->ekf_odom->setFreezePoseFirstLap(this->freeze_pose_first_lap);
   this->ekf_odom->setAssocMahaGate(static_cast<float>(this->assoc_maha_gate));
 
   /* Init mapped cones markers */
@@ -42,7 +42,7 @@ ConeFusion::ConeFusion() : rclcpp::Node("cone_fused_node") {
 }
 
 void ConeFusion::loadParameters() {
-  std::vector<double> tmp_proc_noise(2), tmp_meas_noise(3), tmp_motion_noise(2);
+  std::vector<double> tmp_proc_noise(2), tmp_motion_noise(2);
   declare_parameter("is_colorblind", true);
 
   declare_parameter("generic.output_frame_id", "track");
@@ -61,19 +61,16 @@ void ConeFusion::loadParameters() {
   declare_parameter("generic.enable_logging", false);
   declare_parameter("generic.cone_time_seen_th", 10);
   declare_parameter("generic.is_skidpad_mission", false);
-  declare_parameter("generic.cones_pub_for_debug", false);
 
+#ifdef CONE_FUSED_DEBUG
+  /* Debug-only parameters (compiled in only with -DDEBUG=ON). */
+  declare_parameter("generic.cones_pub_for_debug", false);
   declare_parameter("generic.input_cones_debug_topic", "/slam/input_cones_debug");
   declare_parameter("generic.pub_input_cones_debug", false);
-
-  /* Joint (batch) cone update vs. single-cone-per-scan update */
-  declare_parameter("generic.batch_cone_update", false);
+#endif
 
   /* Freeze the map from lap 2 (rigid pose-only localization) vs. continuous SLAM */
   declare_parameter("generic.freeze_map", true);
-
-  /* Freeze the pose in lap 1 (full FAST-LIMO trust) vs. full SLAM that anchors LIMO drift */
-  declare_parameter("generic.freeze_pose_first_lap", true);
 
   /* Chi-square (2 DOF) gate for lap-2+ Mahalanobis data association */
   declare_parameter("generic.assoc_maha_gate", 9.21);
@@ -83,7 +80,6 @@ void ConeFusion::loadParameters() {
 
   /* Declare Sensor Noise parameters */
   declare_parameter<std::vector<double>>("noises.proc_noise", std::vector<double>{0.0, 0.0});
-  declare_parameter<std::vector<double>>("noises.meas_noise", std::vector<double>{0.0, 0.0, 0.0});
   declare_parameter<std::vector<double>>("noises.motion_noise", std::vector<double>{0.0, 0.0});
   declare_parameter("noises.min_new_cone_distance", 2.0);
 
@@ -105,14 +101,14 @@ void ConeFusion::loadParameters() {
 
   get_parameter("generic.enable_logging", this->enable_logging);
   get_parameter("generic.is_skidpad_mission", this->is_skidpad_mission);
-  get_parameter("generic.cones_pub_for_debug", this->cones_pub_for_debug);
 
+#ifdef CONE_FUSED_DEBUG
+  get_parameter("generic.cones_pub_for_debug", this->cones_pub_for_debug);
   get_parameter("generic.input_cones_debug_topic", this->input_cones_debug_topic);
   get_parameter("generic.pub_input_cones_debug", this->pub_input_cones_debug);
+#endif
 
-  get_parameter("generic.batch_cone_update", this->batch_cone_update);
   get_parameter("generic.freeze_map", this->freeze_map);
-  get_parameter("generic.freeze_pose_first_lap", this->freeze_pose_first_lap);
   get_parameter("generic.assoc_maha_gate", this->assoc_maha_gate);
   get_parameter("generic.eigen_threads", this->eigen_threads);
 
@@ -120,19 +116,15 @@ void ConeFusion::loadParameters() {
 
   /* Get Sensor Noise parameters */
   get_parameter("noises.proc_noise", tmp_proc_noise);
-  get_parameter("noises.meas_noise", tmp_meas_noise);
   get_parameter("noises.motion_noise", tmp_motion_noise);
   get_parameter("noises.min_new_cone_distance", this->min_new_cone_distance);
   get_parameter("generic.cone_time_seen_th", this->cone_time_seen_th);
 
 
   /* Copy noise parameters */
-  for (size_t i = 0; i < 3; i++) {
-    if (i != 2) {
-      this->proc_noise(i) = (float)tmp_proc_noise[i];
-      this->motion_noise(i) = (float)tmp_motion_noise[i];
-    }
-    this->meas_noise(i) = (float)tmp_meas_noise[i];
+  for (size_t i = 0; i < 2; i++) {
+    this->proc_noise(i) = (float)tmp_proc_noise[i];
+    this->motion_noise(i) = (float)tmp_motion_noise[i];
   }
 }
 
@@ -208,13 +200,21 @@ void ConeFusion::conesCallback(const visualization_msgs::msg::Marker::SharedPtr 
 
   free(z);
 
+  /* In a DEBUG build, cones_pub_for_debug keeps republishing the live (lap-1)
+     map even after the corrected map is frozen, for visual comparison. In a
+     normal build it is always false (compiled out). */
+  bool republish_for_debug = false;
+#ifdef CONE_FUSED_DEBUG
   /* Debug: project the raw input cones into the map frame via the current EKF
      pose and publish them as red markers (input vs. map check). */
   if (this->pub_input_cones_debug)
     this->pubInputConesDebug(cones_data);
 
+  republish_for_debug = this->cones_pub_for_debug;
+#endif
+
   /* Publish cones */
-  if (!this->corrected_cones_created || this->cones_pub_for_debug) {
+  if (!this->corrected_cones_created || republish_for_debug) {
     size_t mapped_cones = this->ekf_odom->getActMappedLandmarks();
     conesMarker.points.reserve(mapped_cones);
     conesMarker.colors.reserve(mapped_cones);
@@ -252,7 +252,7 @@ void ConeFusion::conesCallback(const visualization_msgs::msg::Marker::SharedPtr 
   }
 
   /* Publish vehicle pose and cones position */
-  if (!this->corrected_cones_created || this->cones_pub_for_debug) {
+  if (!this->corrected_cones_created || republish_for_debug) {
     this->pubConesMarkers(conesMarker);
     conesMarker.points.clear();
     conesMarker.colors.clear();
@@ -260,28 +260,6 @@ void ConeFusion::conesCallback(const visualization_msgs::msg::Marker::SharedPtr 
     this->pubConesMarkers(correctedConesMarker);
   }
 }
-
-// void ConeFusion::imuDataCallback(    // lidar_imu??
-//     const sensor_msgs::msg::Imu::SharedPtr imu_data) {
-//   // this->ekf_odom->setActAngVel(imu_data->angular_velocity.z);
-//   tf2::Quaternion q;
-//   q.setX(imu_data->orientation.x);
-//   q.setY(imu_data->orientation.y);
-//   q.setZ(imu_data->orientation.z);
-//   q.setW(imu_data->orientation.w);
-//   tf2::Matrix3x3 m(q);
-// 
-//   double r, p, y;
-//   m.getRPY(r, p, y);
-// 
-//   this->act_yaw = y;
-// 
-//   q.setRPY(0.0, 0.0, this->act_yaw);
-//   this->act_orientation.set__x(q.getX());
-//   this->act_orientation.set__y(q.getY());
-//   this->act_orientation.set__z(q.getZ());
-//   this->act_orientation.set__w(q.getW());
-// }
 
 void ConeFusion::fastLimoDataCallback(const nav_msgs::msg::Odometry::SharedPtr fast_limo_data) 
 {
@@ -353,6 +331,7 @@ void ConeFusion::pubConesMarkers(visualization_msgs::msg::Marker &cones) {
   this->conesPositionsMarkerPub->publish(cones);
 }
 
+#ifdef CONE_FUSED_DEBUG
 void ConeFusion::pubInputConesDebug(
     const visualization_msgs::msg::Marker::SharedPtr &cones_data) {
   /* Current EKF pose: project the raw (vehicle-frame) input cones into the map
@@ -388,6 +367,7 @@ void ConeFusion::pubInputConesDebug(
 
   this->inputConesDebugPub->publish(dbg);
 }
+#endif  /* CONE_FUSED_DEBUG */
 
 void ConeFusion::updatePose() {
   geometry_msgs::msg::TransformStamped t;

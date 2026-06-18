@@ -1,4 +1,4 @@
-#include <cone_fused/ekf_odom.hpp>
+#include <cuda_cone_fused/ekf_odom.hpp>
 
 #include <omp.h>
 #include <chrono>
@@ -6,7 +6,7 @@
 #include <utility>
 
 /* Constructor */
-EKFOdom::EKFOdom(Vector2f process_noise, Vector3f measurement_noise, Vector2f motion_noise, const float alpha, int eigen_threads)
+EKFOdom::EKFOdom(Vector2f process_noise, Vector2f motion_noise, const float alpha, int eigen_threads)
 {
     /* Eigen/OpenMP thread count. Default 1: at the matrix sizes here multithreaded
        GEMM mostly adds fork/join jitter (p99 latency blows up at 6 threads on the
@@ -27,28 +27,17 @@ EKFOdom::EKFOdom(Vector2f process_noise, Vector3f measurement_noise, Vector2f mo
     this->P_.block(0, 0, 3, 3) = Matrix3f::Identity();
     this->P_.bottomRightCorner(2 * N_CONES, 2 * N_CONES) = INF * Eigen::MatrixXf::Identity(2 * N_CONES, 2 * N_CONES);
 
-    /* Initialize Process noise covariance */
+    /* Initialize the (range, bearing) measurement-noise covariance Q_. It is the
+       additive term in the innovation covariance S = H P H^T + Q_ used by every
+       correct() update. Diagonal entries come from the `process_noise` parameter
+       (sigma_range [m], sigma_bearing [rad]). */
     this->Q_ = Matrix2f::Identity();
     for (uint8_t i=0;i < process_noise.size(); i++)
     {
-        // this->Q_(i,i) = pow(process_noise(i), 2);
         this->Q_(i,i) = process_noise(i);
     }
-    
+
     std::cerr << "Q_ : \n" << this->Q_ << "\n";
-
-    /* Initialize Measurement noise covariance */
-    this->R_ = Matrix3f::Identity();
-    for (uint8_t i=0;i < measurement_noise.size(); i++)
-    {
-        // this->R_(i,i) = pow(measurement_noise(i), 2);
-        this->R_(i,i) = measurement_noise(i);
-    }
-
-    if(measurement_noise[0] != 0.0 || measurement_noise[1] != 0.0 || measurement_noise[2] != 0.0)
-    {
-        std::cerr << "R_ : \n" << this->R_ << "\n";
-    }
 
     /* Initialize motion (predict-step) process noise: additive pose covariance
        per unit of travelled distance / turned angle (see setPose). */
@@ -59,14 +48,6 @@ EKFOdom::EKFOdom(Vector2f process_noise, Vector3f measurement_noise, Vector2f mo
 
     /* Initialize max new cone dist */
     this->max_new_cone_dist = alpha;
-
-    /* Initialize Fx */
-    this->Fx_ = MatrixXf::Zero(3, 2*N_CONES+3);
-    this->Fx_.block(0,0,3,3) = Matrix3f::Identity();
-
-    /* Initialize Fx_k*/
-    this->Fx_k = MatrixXf::Zero(5, 2*N_CONES+3);
-    this->Fx_k.block(0,0,3,3) = Matrix3f::Identity();
 
 #ifdef USE_CUDA
     /* Bring up the resident-state GPU backend. It initialises the device P and x
@@ -104,56 +85,29 @@ void EKFOdom::syncFromDevice() {
 #endif
 
 
-/* EKF Predict step function */
-void EKFOdom::predict(const float dt) {
-    /* If, for any reason, actual ang velocity is zero, set a very tiny quanity to avoid a division by 0 */
-    this->act_ang_vel = (this->act_ang_vel == 0.0) ? __FLT_MIN__ : this->act_ang_vel;
-
-    Matrix3f gt = Matrix3f::Zero();
-    gt(0,2) = 
-        (this->act_vel / this->act_ang_vel) * (sin(this->x_(2) + this->act_ang_vel * dt) - sin(this->x_(2)));
-    gt(1,2) = 
-        (this->act_vel / this->act_ang_vel) * (cos(this->x_(2)) - cos(this->x_(2) + this->act_ang_vel * dt));
-    gt(2,2) = 1.0f;
-
-    MatrixXf Gt = MatrixXf::Identity(2*N_CONES + 3, 2*N_CONES + 3);
-    Gt = Gt + (this->Fx_.transpose() * gt * this->Fx_);
-    // Gt.bottomRightCorner(2 * N, 2 * N) = Eigen::MatrixXf::Identity(2 * N, 2 * N);
-
-    Vector3f velocity_based_motion;
-    velocity_based_motion(0) = 
-        (-this->act_vel / this->act_ang_vel) * sin(this->x_(2)) + 
-        (this->act_vel / this->act_ang_vel) * sin(this->x_(2) + this->act_ang_vel * dt);
-    velocity_based_motion(1) = 
-        (this->act_vel / this->act_ang_vel) * cos(this->x_(2)) - 
-        (this->act_vel / this->act_ang_vel) * cos(this->x_(2) + this->act_ang_vel * dt);
-    velocity_based_motion(2) =
-        this->act_ang_vel * dt;
-
-    /* Update expected vehicle state */
-    this->x_ += this->Fx_.transpose() * velocity_based_motion;
-    // this->x_(2) = this->normalizeYaw(this->x_(2));
-
-    /* Update expected covariance matrix */
-    this->P_ = (Gt * this->P_ * Gt.transpose()) + (this->Fx_.transpose() * this->R_ * this->Fx_);
-}
-
-
-/* EKF Correct step function */
+/* EKF Correct step function.
+   Note: there is no separate predict() entry point. The motion (predict) step is
+   driven by FAST-LIMO odometry and applied in setPose()/setPoseCovariance(), which
+   propagate the pose mean and covariance before the next correction. */
 size_t EKFOdom::correct(const Vector3f *z, const size_t act_cones_detected) {
     /* Diagnostic: # of observations that passed data association this scan. */
     size_t associated = 0;
     /* Vector that stores the temp parameters for a hypothetical new cone */
     Vector2f tmp_cone;
-    /* Vector that stores the delta X,Y between a cone and the vehicle */
+#ifndef USE_CUDA
+    /* Vector that stores the delta X,Y between a cone and the vehicle (single-cone path) */
     Vector2f delta_k;
+#endif
 
     size_t i,k, j = 0;
     float min_dist;
 
-    /* Associations collected this scan for the batch (joint) update path:
-       (landmark index k, observed (range, bearing)). Unused in single-cone mode. */
+#ifdef USE_CUDA
+    /* Associations collected this scan for the joint (batch) update path:
+       (landmark index k, observed (range, bearing)). GPU build only — the
+       CPU-only build does the single-cone update inline. */
     std::vector<std::pair<size_t, Vector2f>> batch_obs;
+#endif
 
     // VectorXf new_state_update = VectorXf::Zero(2*N_CONES+3);
     // MatrixXf new_covariance_update = MatrixXf::Zero(2*N_CONES+3, 2*N_CONES+3);
@@ -258,21 +212,16 @@ size_t EKFOdom::correct(const Vector3f *z, const size_t act_cones_detected) {
         // std::cerr << "EKF INDEX: " << i << " k is: " << k << "\n";
         associated++;   /* reached only by observations that passed association */
 
-        /* The GPU backend keeps the authoritative P_ on the device, so EVERY
-           covariance-modifying update must go through the joint (batch) path that
-           is offloaded; the single-cone CPU update would read/write a stale host
-           P_. Hence collect into batch when the GPU is active too. */
-        bool collect_batch = this->batch_update_;
 #ifdef USE_CUDA
-        collect_batch = collect_batch || this->use_gpu_;
-#endif
-        if (collect_batch)
-        {
-            /* Defer: collect this association. The joint update over all cones
-               is applied once after the loop (see batch block below). */
-            batch_obs.emplace_back(k, Vector2f(z[i](0), z[i](1)));
-        }
-        else if (i == (act_cones_detected-1))
+        /* GPU build: defer EVERY association to the joint update applied once
+           after the loop. The device holds the authoritative P_, so all
+           covariance-modifying updates must go through the offloaded joint path
+           (a single-cone CPU update would read/write a stale host P_); the
+           single-cone path below is therefore compiled out entirely. */
+        batch_obs.emplace_back(k, Vector2f(z[i](0), z[i](1)));
+#else
+        /* CPU-only (debug) build: single-cone-per-scan update on the last cone. */
+        if (i == (act_cones_detected-1))
         {
             delta_k = this->x_.segment((3 + (2*k)), 2) - Vector2f(this->x_(0), this->x_(1)); /* This is equivalent to ((cone_x - vehicle_x), (cone_y - vehicle_y)) */
 
@@ -327,8 +276,8 @@ size_t EKFOdom::correct(const Vector3f *z, const size_t act_cones_detected) {
                    freeze_map_ is false, in lap 2+ as well (continuous SLAM: pose
                    AND landmarks keep being corrected — the legacy behavior, which
                    refines the map but can let the global-rotation gauge drift).
-                   The pose is FROZEN (gain rows zeroed) only during lap 1, where
-                   the map is still sparse/immature; from lap 2 it is corrected. */
+                   The pose is corrected in every lap, including lap 1: the cones
+                   anchor FAST-LIMO drift while the map is built. */
                 const size_t na = 3 + 2 * this->landmark_count;
 
                 MatrixXf Fx_k_a = MatrixXf::Zero(5, na);
@@ -341,9 +290,6 @@ size_t EKFOdom::correct(const Vector3f *z, const size_t act_cones_detected) {
                 MatrixXf HtP = Ht_k * P_a;                      /* (2 x na) */
                 Matrix2f S = (HtP * Ht_k.transpose()) + this->Q_;
                 MatrixXf K = P_a * Ht_k.transpose() * S.inverse();
-
-                if (!this->is_first_lap_completed && this->freeze_pose_first_lap_)
-                    K.topRows(3).setZero();                     /* freeze pose (lap 1, full LIMO trust) */
 
                 this->x_.head(na).noalias() += (K * meas_diff);
                 this->x_(2) = this->normalizeYaw(this->x_(2));
@@ -374,6 +320,7 @@ size_t EKFOdom::correct(const Vector3f *z, const size_t act_cones_detected) {
             }
 
         }
+#endif  /* !USE_CUDA: single-cone path */
     }
 
     /* ---- Batch (joint) measurement update --------------------------------
@@ -382,12 +329,10 @@ size_t EKFOdom::correct(const Vector3f *z, const size_t act_cones_detected) {
        shrinks P ~M-fold and drives the filter overconfident until it diverges;
        a joint update instead linearises every cone at the SAME state and does
        exactly ONE covariance reduction, so it uses all the measurement
-       information while staying consistent. */
-    bool do_batch = this->batch_update_;
+       information while staying consistent. Only the GPU build reaches this
+       path (the CPU-only build uses the single-cone update above). */
 #ifdef USE_CUDA
-    do_batch = do_batch || this->use_gpu_;   /* GPU always uses the joint path */
-#endif
-    if (do_batch && !batch_obs.empty())
+    if (!batch_obs.empty())
     {
         const size_t na = 3 + 2 * this->landmark_count;
 
@@ -440,7 +385,8 @@ size_t EKFOdom::correct(const Vector3f *z, const size_t act_cones_detected) {
                 /* FULL-STATE joint update — build/refine the map. Used in lap 1
                    (mapping) and, when freeze_map_ is false, in lap 2+ too
                    (continuous SLAM). H is sparse: each cone touches pose + its
-                   landmark. The pose is frozen only during lap 1. */
+                   landmark. The pose is corrected in every lap, including lap 1
+                   (the cones anchor FAST-LIMO drift while mapping). */
                 auto P_a = this->P_.topLeftCorner(na, na);
 
                 MatrixXf H = MatrixXf::Zero(2*m, na);
@@ -450,10 +396,6 @@ size_t EKFOdom::correct(const Vector3f *z, const size_t act_cones_detected) {
                     H.block(2*r, 3 + 2*ups[r].k, 2, 2) = ups[r].Hb.rightCols(2);
                 }
 
-                const bool freeze_pose =
-                    (!this->is_first_lap_completed && this->freeze_pose_first_lap_);
-
-#ifdef USE_CUDA
                 if (this->use_gpu_)
                 {
                     /* Offload the O(na^2 m) update onto the resident device state.
@@ -461,7 +403,7 @@ size_t EKFOdom::correct(const Vector3f *z, const size_t act_cones_detected) {
                        so they map straight onto cuBLAS. */
                     if (!this->gpu_->batchUpdateFullState(
                             static_cast<int>(na), H.data(), R.data(),
-                            nu_all.data(), static_cast<int>(2*m), freeze_pose))
+                            nu_all.data(), static_cast<int>(2*m)))
                     {
                         std::cerr << "EKFOdom: GPU batch update failed: "
                                   << this->gpu_->lastError() << "\n";
@@ -474,14 +416,11 @@ size_t EKFOdom::correct(const Vector3f *z, const size_t act_cones_detected) {
                     this->gpu_->uploadPose3(p3);
                 }
                 else
-#endif
                 {
+                    /* CPU fallback (GPU init failed): same joint update on the host. */
                     MatrixXf HP = H * P_a;                           /* (2m x na)  */
                     MatrixXf S  = (HP * H.transpose()) + R;          /* (2m x 2m)  */
                     MatrixXf K  = P_a * H.transpose() * S.inverse(); /* (na x 2m)  */
-
-                    if (freeze_pose)
-                        K.topRows(3).setZero();                      /* freeze pose (lap 1, full LIMO trust) */
 
                     this->x_.head(na).noalias() += (K * nu_all);
                     this->x_(2) = this->normalizeYaw(this->x_(2));
@@ -510,7 +449,6 @@ size_t EKFOdom::correct(const Vector3f *z, const size_t act_cones_detected) {
                 this->x_(2) = this->normalizeYaw(this->x_(2));
                 P_pp.noalias() -= (K_p * HpP);
 
-#ifdef USE_CUDA
                 /* The rigid update touches ONLY the 3x3 pose block and the pose
                    mean — both valid host mirrors — so it is computed on the host
                    above and the result pushed back to the resident device P/x. */
@@ -524,10 +462,10 @@ size_t EKFOdom::correct(const Vector3f *z, const size_t act_cones_detected) {
                                      Pm(2,0), Pm(2,1), Pm(2,2) };
                     this->gpu_->uploadPoseBlock3x3(P33);
                 }
-#endif
             }
         }
     }
+#endif  /* USE_CUDA: joint (batch) update path */
 
     return associated;
 }
@@ -537,11 +475,7 @@ VectorXf EKFOdom::getState() const {
     return x_;
 }
 
-/* Return current error covariance */
-MatrixXf EKFOdom::getCovariance() const {
-    return P_;
-}
-
+/* Return the diagonal (variances) of the 3x3 pose covariance block */
 Vector3f EKFOdom::getPoseCovariance() const
 {
     Vector3f pose_cov;
@@ -553,47 +487,17 @@ Vector3f EKFOdom::getPoseCovariance() const
     return pose_cov;
 }
 
-/* Return current process noise covariance */
-Matrix2f EKFOdom::getProcessNoiseCovariance() const {
-    return Q_;
-}
-
-Matrix3f EKFOdom::getMeasurementNoiseCovariance() const {
-    return R_;
-}
-
-MatrixXf EKFOdom::getFx() const {
-    return Fx_;
-}
 void EKFOdom::setFirstLapCompleted(const bool first_lap_completed)
 {
     this->is_first_lap_completed = first_lap_completed;
-}
-void EKFOdom::setBatchUpdate(const bool enable)
-{
-    this->batch_update_ = enable;
 }
 void EKFOdom::setFreezeMap(const bool enable)
 {
     this->freeze_map_ = enable;
 }
-void EKFOdom::setFreezePoseFirstLap(const bool enable)
-{
-    this->freeze_pose_first_lap_ = enable;
-}
 void EKFOdom::setAssocMahaGate(const float gate)
 {
     this->assoc_maha_gate_ = gate;
-}
-
-
-void EKFOdom::setActVel(const float vel)
-{
-    this->act_vel = vel;
-}
-void EKFOdom::setActAngVel(const float ang_vel)
-{
-    this->act_ang_vel = ang_vel;
 }
 
 void EKFOdom::setPose(const Vector3f pose)

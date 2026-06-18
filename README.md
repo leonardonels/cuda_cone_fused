@@ -351,7 +351,7 @@ backend** offloads the heavy linear algebra:
 - **Compile-time switch** (cuBLAS/cuSOLVER vs Eigen), *not* a runtime parameter. Built only with
   `-DUSE_CUDA=ON` (**default ON**). `OFF` → the original CPU-only build with no CUDA dependency —
   the debug backend, "like before".
-- `EkfCudaBackend` (`include/cone_fused/ekf_cuda.hpp`, `src/ekf_cuda.cu`) keeps **$\mathbf{P}$
+- `EkfCudaBackend` (`include/cuda_cone_fused/ekf_cuda.hpp`, `src/ekf_cuda.cu`) keeps **$\mathbf{P}$
   ($n\times n$) and $\mathbf{x}$ resident on the device** for the whole run (allocated/initialised
   once; `thrust::device_vector`, RAII). The $n\times n$ covariance never crosses the bus.
 - **On device** (cuBLAS + cuSOLVER): the batch full-state update
@@ -371,8 +371,8 @@ Verified on the Orin Nano Super (sm_87): GPU vs Eigen relative error ~$10^{-4}$;
 tail and throughput (target <1 ms): `sudo nvpmodel -m 0 && sudo jetson_clocks`.
 
 ```bash
-colcon build --packages-select cone_fused                                # GPU backend (default)
-colcon build --packages-select cone_fused --cmake-args -DUSE_CUDA=OFF    # CPU-only (debug)
+colcon build --packages-select cuda_cone_fused                                # GPU backend (default)
+colcon build --packages-select cuda_cone_fused --cmake-args -DUSE_CUDA=OFF    # CPU-only (debug)
 ```
 
 ### A single publication source
@@ -407,7 +407,7 @@ colcon build --packages-select cone_fused --cmake-args -DUSE_CUDA=OFF    # CPU-o
 | `generic.is_colorblind` | `true` → all cones treated as yellow (color ignored in association). | Leave `true` if the color from the perceptor is unreliable. |
 | `generic.is_skidpad_mission` | Skidpad mode: publishes pose only, no cone markers. | `false` for missions with cone mapping. |
 | `generic.eigen_threads` | Eigen/OpenMP threads for the **CPU** linear algebra. Default `1`. At these matrix sizes multithreaded GEMM mostly adds fork/join jitter (p99 latency blows up at 6 threads on the 6-core SoC). With the GPU backend the heavy work is offloaded, so this only matters for a CPU-only build. | Keep `1`. Try `2` only when profiling a CPU-only (`-DUSE_CUDA=OFF`) build on a full-size map; never the old `6`. |
-| `USE_CUDA` (compile-time, CMake) | **Build flag**, not a yaml param. `ON` (default) → GPU backend (needs CUDA toolkit). `OFF` → CPU-only build, no CUDA dependency (debug). See §5. | `colcon build --packages-select cone_fused --cmake-args -DUSE_CUDA=OFF` for the CPU debug build. |
+| `USE_CUDA` (compile-time, CMake) | **Build flag**, not a yaml param. `ON` (default) → GPU backend (needs CUDA toolkit). `OFF` → CPU-only build, no CUDA dependency (debug). See §5. | `colcon build --packages-select cuda_cone_fused --cmake-args -DUSE_CUDA=OFF` for the CPU debug build. |
 | `N_CONES` (compile-time, `ekf_odom.hpp`) | Maximum landmark capacity. Increasing it enlarges the matrices (cost $\propto N$ on the inactive block, but `correct()` only works on $n_a$). | Raise if the track has more than ~400 cones. |
 
 ---

@@ -11,7 +11,7 @@
 #include <tf2_ros/transform_broadcaster.h>
 #include <visualization_msgs/msg/marker.hpp>
 
-#include <cone_fused/ekf_odom.hpp>
+#include <cuda_cone_fused/ekf_odom.hpp>
 
 #include <mmr_base/msg/race_status.hpp>
 
@@ -25,17 +25,22 @@ private:
 
   /* Subscriptions topics' names */
   std::string cones_topic, imu_topic, input_odom_topic, race_status_topic,
-      mapped_cones_topic, output_odom_topic, 
-      output_frame_id, output_child_frame_id,
-      // gps_speed_topic, gps_data_topic, 
-      input_cones_debug_topic;
+      mapped_cones_topic, output_odom_topic,
+      output_frame_id, output_child_frame_id;
+      // gps_speed_topic, gps_data_topic,
 
-  /* Debug parameter */
+#ifdef CONE_FUSED_DEBUG
+  /* Debug topic name and parameters — only compiled in a -DDEBUG=ON build. */
+  std::string input_cones_debug_topic;
+
+  /* If true, keep republishing the live map even after the corrected map is
+     frozen (raw vs. corrected map comparison). */
   bool cones_pub_for_debug;
 
   /* If true, publish the raw input cones projected into the map frame via the
      current EKF pose (red markers) for an input-vs-map visual check */
   bool pub_input_cones_debug = false;
+#endif
 
   /* Enable logging parameter */
   bool enable_logging;
@@ -73,16 +78,9 @@ private:
   /* Min number of time a cone has to be seen in order to map it */
   uint32_t cone_time_seen_th;
 
-  /* If true, the EKF fuses all cones of a scan in one joint update (vs. only the last) */
-  bool batch_cone_update = false;
-
   /* If true (default), lap 2+ freezes the map (rigid pose-only localization); if
      false, lap 2+ keeps refining pose AND landmarks (continuous SLAM, legacy) */
   bool freeze_map = true;
-
-  /* If true (default), lap 1 freezes the pose (full FAST-LIMO trust, map only); if
-     false, lap 1 runs full SLAM so cones also anchor LIMO drift while mapping */
-  bool freeze_pose_first_lap = true;
 
   /* Chi-square (2 DOF) gate for lap-2+ data association by Mahalanobis distance */
   double assoc_maha_gate = 9.21;
@@ -92,7 +90,6 @@ private:
 
   /* EKF Parameters */
   Vector2f proc_noise;
-  Vector3f meas_noise;
   double min_new_cone_distance;
 
   /* Motion process noise: [x,y per metre travelled, theta per radian turned].
@@ -108,7 +105,9 @@ private:
   /* ROS 2 Publishers */
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr conesPositionsMarkerPub;
+#ifdef CONE_FUSED_DEBUG
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr inputConesDebugPub;
+#endif
 
   /* ROS 2 Subscribers */
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr fast_limo_odom_sub;
@@ -130,9 +129,11 @@ private:
   /* Method for publishing cones markers */
   void pubConesMarkers(visualization_msgs::msg::Marker &cones);
 
+#ifdef CONE_FUSED_DEBUG
   /* Debug: project raw input cones into the map frame (current EKF pose) and
      publish them as red markers for an input-vs-map visual comparison */
   void pubInputConesDebug(const visualization_msgs::msg::Marker::SharedPtr &cones_data);
+#endif
 
   /* Method for updating vehicle pose */
   void updatePose();

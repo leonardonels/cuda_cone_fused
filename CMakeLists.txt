@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.5)
-project(cone_fused)
+project(cuda_cone_fused)
 
 # Default to C99
 if(NOT CMAKE_C_STANDARD)
@@ -30,17 +30,33 @@ endif()
 #                                   CUDA toolchain dependency (the debug backend).
 # ----------------------------------------------------------------------------
 option(USE_CUDA "Build the resident-state GPU EKF backend (needs CUDA toolkit)" ON)
-set(CONE_FUSED_CUDA_ARCH "87" CACHE STRING "CUDA arch for the GPU backend (Orin = 87)")
+set(CUDA_CONE_FUSED_CUDA_ARCH "87" CACHE STRING "CUDA arch for the GPU backend (Orin = 87)")
+
+# ----------------------------------------------------------------------------
+# Optional debug instrumentation.
+#   cmake ... -DDEBUG=ON  -> define CONE_FUSED_DEBUG so the node compiles in the
+#                            debug-only publishers/topics (raw input-cone overlay
+#                            and the live-map republish). The matching node
+#                            parameters (cones_pub_for_debug, pub_input_cones_debug,
+#                            input_cones_debug_topic) are only read in this build.
+#   (default OFF)         -> the debug publishers are compiled out entirely.
+# ----------------------------------------------------------------------------
+option(DEBUG "Compile in the debug-only cone publishers/topics" OFF)
+if(DEBUG)
+  message(STATUS "cuda_cone_fused: DEBUG publishers ENABLED (CONE_FUSED_DEBUG)")
+else()
+  message(STATUS "cuda_cone_fused: DEBUG publishers disabled")
+endif()
 
 if(USE_CUDA)
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
   # Default arch for every target so CMP0104 doesn't complain about the
   # (non-CUDA) executable target that links the CUDA-enabled library.
-  set(CMAKE_CUDA_ARCHITECTURES "${CONE_FUSED_CUDA_ARCH}")
-  message(STATUS "cone_fused: GPU backend ENABLED (CUDA arch ${CONE_FUSED_CUDA_ARCH})")
+  set(CMAKE_CUDA_ARCHITECTURES "${CUDA_CONE_FUSED_CUDA_ARCH}")
+  message(STATUS "cuda_cone_fused: GPU backend ENABLED (CUDA arch ${CUDA_CONE_FUSED_CUDA_ARCH})")
 else()
-  message(STATUS "cone_fused: GPU backend disabled (CPU-only build)")
+  message(STATUS "cuda_cone_fused: GPU backend disabled (CPU-only build)")
 endif()
 
 # find dependencies
@@ -60,15 +76,15 @@ include_directories(
 )
 
 # Build Node class
-set(CONE_FUSED_SOURCES
+set(CUDA_CONE_FUSED_SOURCES
   src/${PROJECT_NAME}.cpp
   src/ekf_odom.cpp
 )
 if(USE_CUDA)
-  list(APPEND CONE_FUSED_SOURCES src/ekf_cuda.cu)
+  list(APPEND CUDA_CONE_FUSED_SOURCES src/ekf_cuda.cu)
 endif()
 
-add_library(${PROJECT_NAME} ${CONE_FUSED_SOURCES})
+add_library(${PROJECT_NAME} ${CUDA_CONE_FUSED_SOURCES})
 
 ament_target_dependencies(${PROJECT_NAME}
   rclcpp
@@ -85,9 +101,13 @@ target_link_libraries(${PROJECT_NAME}
   OpenMP::OpenMP_CXX
 )
 
+if(DEBUG)
+  target_compile_definitions(${PROJECT_NAME} PUBLIC CONE_FUSED_DEBUG)
+endif()
+
 if(USE_CUDA)
   set_target_properties(${PROJECT_NAME} PROPERTIES
-    CUDA_ARCHITECTURES "${CONE_FUSED_CUDA_ARCH}"
+    CUDA_ARCHITECTURES "${CUDA_CONE_FUSED_CUDA_ARCH}"
     CUDA_SEPARABLE_COMPILATION ON
   )
   target_compile_definitions(${PROJECT_NAME} PUBLIC USE_CUDA)

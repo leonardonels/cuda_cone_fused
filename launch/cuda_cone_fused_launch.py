@@ -8,7 +8,7 @@ import os
 def generate_launch_description():
 
     config_node = os.path.join(
-        get_package_share_directory('cone_fused'),
+        get_package_share_directory('cuda_cone_fused'),
         'config',
         'config.yaml'
         )
@@ -21,10 +21,10 @@ def generate_launch_description():
 
 
     node=Node(
-            package='cone_fused',
-            # namespace='cone_fused',
-            name='cone_fused_node',
-            executable='cone_fused_node',
+            package='cuda_cone_fused',
+            # namespace='cuda_cone_fused',
+            name='cuda_cone_fused_node',
+            executable='cuda_cone_fused_node',
             output = 'screen',
             # prefix=["gdbserver localhost:3000"],
             parameters=[config_node, {'is_skidpad_mission': LaunchConfiguration('is_skidpad_mission')}]

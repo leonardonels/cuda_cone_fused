@@ -1,4 +1,4 @@
-/cone_fused_node:
+/cuda_cone_fused_node:
   ros__parameters:
     generic:
       is_colorblind: true
@@ -17,16 +17,25 @@
       enable_logging: true
       cone_time_seen_th: 10
       is_skidpad_mission: false
+
+      # --- DEBUG-only parameters -------------------------------------------
+      # The following take effect ONLY in a debug build (cmake -DDEBUG=ON, which
+      # defines CONE_FUSED_DEBUG). In a normal build they are compiled out and
+      # ignored, so the debug publishers/topics never exist on the wire.
+
+      # Keep republishing the live map even after the corrected map is frozen,
+      # so the raw (lap-1) vs. corrected map can be compared.
       cones_pub_for_debug: true
 
-      # Debug: publish the raw input cones projected into the map frame via the
+      # Publish the raw input cones projected into the map frame via the
       # current EKF pose, as RED markers, to compare live observations vs. the map.
       pub_input_cones_debug: true
       input_cones_debug_topic: "/slam/input_cones_debug"
+      # ---------------------------------------------------------------------
 
-      # Cone correction mode: false = single cone/scan (default, cheap, stable);
-      # true = joint update fusing all associated cones in one EKF step (A/B test).
-      batch_cone_update: true
+      # Cone correction mode is fixed at build time, not here: a GPU build
+      # (cmake -DUSE_CUDA=ON) always uses the joint update fusing all associated
+      # cones in one EKF step; a CPU-only build always uses the single-cone path.
 
       # Map handling from lap 2 onward:
       #   true  = freeze the map: rigid pose-only localization (landmarks fixed,
@@ -35,18 +44,11 @@
       #           (legacy behavior; refines the map but can let it slowly rotate).
       # Note: no NEW cones are added after lap 1 in either mode; "continuous" only
       # refines the positions of cones already mapped in lap 1.
-      freeze_map: false
+      freeze_map: false   # probably should be true for the final version, but false is useful for debugging and testing
 
-      # Lap-1 (mapping) pose handling:
-      #   true  = freeze the pose: trust FAST-LIMO completely while only building
-      #           the map (default). Simple, but LIMO drift during lap 1 is baked
-      #           into the map (smeared / duplicated cones if LIMO drifts).
-      #   false = full EKF-SLAM in lap 1: cones also correct the pose while mapping,
-      #           so LIMO drift is anchored as the map is built (esp. at loop
-      #           closure). More robust to LIMO drift, but a bad data association
-      #           in the still-sparse lap-1 map can now corrupt the pose, not just
-      #           add a stray landmark.
-      freeze_pose_first_lap: false
+      # Lap 1 always runs full EKF-SLAM: the cones correct the pose while the map
+      # is built, so FAST-LIMO drift is anchored as we go (FAST-LIMO cannot yet be
+      # trusted on its own). This is no longer optional.
 
       # Lap-2+ data association: a cone associates to the nearest mapped landmark
       # only if its Mahalanobis distance d^2 = nu^T S^-1 nu is below this gate
@@ -63,8 +65,7 @@
       eigen_threads: 1
 
     noises:
-      proc_noise:  [0.7, 0.3]             # Sigma range [m] and bearing [rad]
-      # meas_noise:  [0.02, 0.02, 0.07]     # Gaussian error of the odometry X,Y position [m] and Yaw angle [rad]
+      proc_noise:  [0.7, 0.3]             # (range, bearing) measurement noise: sigma range [m], sigma bearing [rad]
 
       # Motion process noise (the Q of the predict step), added to the pose
       # covariance each step proportional to motion: [pos per metre travelled

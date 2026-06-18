@@ -1,9 +1,9 @@
-#include <cone_fused/cone_fused.hpp>
+#include <cuda_cone_fused/cuda_cone_fused.hpp>
 #include <unistd.h>
 
 void handleSignal(int signal) {
     if (signal == SIGINT) {
-        std::cout << "Received SIGINT. Killing cone_fused process.\n";
+        std::cout << "Received SIGINT. Killing cuda_cone_fused process.\n";
         rclcpp::shutdown();
     }
 }

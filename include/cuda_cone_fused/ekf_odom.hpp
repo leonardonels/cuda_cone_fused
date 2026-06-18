@@ -7,7 +7,7 @@
 #include <iostream>
 
 #ifdef USE_CUDA
-#include <cone_fused/ekf_cuda.hpp>
+#include <cuda_cone_fused/ekf_cuda.hpp>
 #include <memory>
 #endif
 
@@ -27,16 +27,10 @@ typedef Eigen::Matrix<ColorLogic, N_CONES, 1> SignatureVector;
 class EKFOdom
 {
 private:
-    Eigen::VectorXf x_;     /* Robot state vector */
-    Eigen::MatrixXf P_;     /* Covariance matrix */
-    Eigen::Matrix2f Q_;     /* Process noise covariance */
-    Eigen::Matrix3f R_;     /* Measurement covariance */
-    Eigen::MatrixXf Fx_;    /* Convenience matrix used for mapping the 3D state vector to (3, 3N + 3)D during update step */
-    Eigen::MatrixXf Fx_k;   /* Convenience matrix used for mapping the 3D state vector to (6,  3N + 3)D during correction step */
+    Eigen::VectorXf x_;     /* Robot state vector: [x, y, theta | m_0x, m_0y, ...] */
+    Eigen::MatrixXf P_;     /* State covariance matrix */
+    Eigen::Matrix2f Q_;     /* (range, bearing) measurement-noise covariance, added to the innovation covariance S in correct() */
     SignatureVector s_;     /* Vector containing the signature for each landmark. In our case the signature is the COLOR of the cone. The ID for each color are defined in hedaer file: "color_logic.hpp" . */
-
-    float act_vel = 0.0;       /* Actual vehicle velocity [m/s] */
-    float act_ang_vel = 0.0;   /* Actual vehicle angular_velocity [rad/s] */
 
     size_t landmark_count = 0;  /* Counter of mapped landmarks */
 
@@ -51,11 +45,13 @@ private:
 
     bool is_first_lap_completed = false; /* Bool to understand if the first lap is completed. In that case, do not map any new cone */
 
-    bool batch_update_ = false; /* If true, correct() fuses ALL cones associated in a scan in one joint EKF update instead of only the last one */
+    /* Cone-update regime is fixed at build time: a GPU build (USE_CUDA) always
+       fuses ALL cones of a scan in one joint EKF update (and the single-cone
+       path is compiled out); a CPU-only build always does the single-cone
+       update. Lap 1 always runs full EKF-SLAM (cones correct the pose too) —
+       FAST-LIMO is never trusted blindly while mapping. */
 
     bool freeze_map_ = true; /* If true (default), lap 2+ does a rigid-map pose-only update (landmarks fixed, gauge locked). If false, lap 2+ keeps doing a full-state SLAM update (pose AND landmarks corrected continuously). */
-
-    bool freeze_pose_first_lap_ = true; /* If true (default), lap 1 freezes the pose (K_pose=0), fully trusting FAST-LIMO while only building the map. If false, lap 1 runs full EKF-SLAM (cones also correct the pose), so LIMO drift is anchored while mapping. */
 
     float assoc_maha_gate_ = 9.21f; /* chi-square (2 DOF) gate for lap-2+ data association by Mahalanobis distance */
 
@@ -75,11 +71,8 @@ private:
 #endif
 
 public:
-    EKFOdom(Vector2f process_noise, Vector3f measurement_noise, Vector2f motion_noise, const float alpha, int eigen_threads = 1);
+    EKFOdom(Vector2f process_noise, Vector2f motion_noise, const float alpha, int eigen_threads = 1);
     virtual ~EKFOdom();
-    
-
-    void predict(const float dt);
 
     /**
      * Correct filter state using measurement(s) z:
@@ -95,21 +88,13 @@ public:
     size_t correct(const Vector3f *z, const size_t act_cones_detected);
     
     VectorXf getState() const;
-    MatrixXf getCovariance() const;
     Vector3f getPoseCovariance() const;
-    Matrix2f getProcessNoiseCovariance() const;
-    Matrix3f getMeasurementNoiseCovariance() const;
-    MatrixXf getFx() const;
     size_t getActMappedLandmarks() const;
     SignatureVector getSignatures() const;
 
     void setFirstLapCompleted(const bool first_lap_completed);
-    void setBatchUpdate(const bool enable);
     void setFreezeMap(const bool enable);
-    void setFreezePoseFirstLap(const bool enable);
     void setAssocMahaGate(const float gate);
-    void setActVel(const float vel);
-    void setActAngVel(const float ang_vel);
     void setPose(const Vector3f pose);
     void setPoseCovariance(const Vector3f pos_cov);
 
