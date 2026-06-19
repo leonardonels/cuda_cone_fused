@@ -2,6 +2,8 @@
 
 #include <cstddef>
 
+#include <cuda_cone_fused/backend/ekf_backend.hpp>
+
 /**
  * Resident-state GPU backend for the EKF-SLAM filter.
  *
@@ -28,7 +30,7 @@
  * All host buffers are COLUMN-MAJOR contiguous (Eigen default) so they map onto
  * cuBLAS without transposes. The device P uses leading dimension = dim.
  */
-class EkfCudaBackend {
+class CudaBackend : public IEkfBackend {
 public:
     /**
      * @param dim       full state dimension (= 3 + 2*N_CONES).
@@ -40,16 +42,16 @@ public:
      * Initialises device P = blockdiag(I_3, inf_init * I_2N) and x = 0, exactly
      * like the CPU EKFOdom constructor.
      */
-    EkfCudaBackend(int dim, int max_two_m, float inf_init);
-    ~EkfCudaBackend();
+    CudaBackend(int dim, int max_two_m, float inf_init);
+    ~CudaBackend() override;
 
-    EkfCudaBackend(const EkfCudaBackend&) = delete;
-    EkfCudaBackend& operator=(const EkfCudaBackend&) = delete;
+    CudaBackend(const CudaBackend&) = delete;
+    CudaBackend& operator=(const CudaBackend&) = delete;
 
     /** True if construction and all CUDA setup succeeded. */
-    bool ok() const;
+    bool ok() const override;
     /** Human-readable last-error string (empty if none). */
-    const char* lastError() const;
+    const char* lastError() const override;
 
     /* ---- hot path -------------------------------------------------------- */
 
@@ -65,7 +67,7 @@ public:
      * @return false on any CUDA/cuBLAS/cuSOLVER failure (state left unchanged).
      */
     bool batchUpdateFullState(int na, const float* H, const float* R,
-                              const float* nu, int two_m);
+                              const float* nu, int two_m) override;
 
     /* ---- predict / motion (setPose) ------------------------------------- */
 
@@ -79,36 +81,36 @@ public:
      */
     void motionPropagate(int na, const float G3x3[9],
                          float dwx, float dwy, float dtheta,
-                         float add_xx, float add_yy, float add_yaw);
+                         float add_xx, float add_yy, float add_yaw) override;
 
     /** setPoseCovariance: add increments to the pose covariance diagonal. */
-    void addPoseCovDiag(float dxx, float dyy, float dyaw);
+    void addPoseCovDiag(float dxx, float dyy, float dyaw) override;
 
     /* ---- structure / IO -------------------------------------------------- */
 
     /** Lap-1 new cone: write landmark k mean (x[3+2k], x[3+2k+1]). */
-    void insertLandmark(int k, float mx, float my);
+    void insertLandmark(int k, float mx, float my) override;
 
     /** Download x(0..2). */
-    void downloadPose3(float pose3[3]) const;
+    void downloadPose3(float pose3[3]) const override;
     /** Download P(0,0), P(1,1), P(2,2). */
-    void downloadPoseCov3(float cov3[3]) const;
+    void downloadPoseCov3(float cov3[3]) const override;
     /** Download the 3x3 top-left pose covariance block (row-major). */
-    void downloadPoseBlock3x3(float P33[9]) const;
+    void downloadPoseBlock3x3(float P33[9]) const override;
     /** Download the first `count` landmark means: xy[2i],xy[2i+1] = x[3+2i..]. */
-    void downloadLandmarks(float* xy, int count) const;
+    void downloadLandmarks(float* xy, int count) const override;
     /** Overwrite the pose mean x(0..2) on the device (host-side scalar fixups). */
-    void uploadPose3(const float pose3[3]);
+    void uploadPose3(const float pose3[3]) override;
     /** Overwrite the 3x3 top-left pose covariance block (row-major in). Used by
      *  the rigid pose-only update, which is computed host-side on the 3x3 mirror
      *  and written back (it touches only the pose block). */
-    void uploadPoseBlock3x3(const float P33[9]);
+    void uploadPoseBlock3x3(const float P33[9]) override;
 
     /* ---- debug / validation (full dim x dim transfers) ------------------- */
     /** Overwrite the resident P (dim*dim col-major) and x (dim). Test/seed use. */
-    void debugSetState(const float* P, const float* x);
+    void debugSetState(const float* P, const float* x) override;
     /** Read back the full resident P (dim*dim col-major) and x (dim). */
-    void debugGetState(float* P, float* x) const;
+    void debugGetState(float* P, float* x) const override;
 
 private:
     struct Impl;

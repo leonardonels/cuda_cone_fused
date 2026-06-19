@@ -79,9 +79,12 @@ include_directories(
 set(CUDA_CONE_FUSED_SOURCES
   src/${PROJECT_NAME}.cpp
   src/ekf_odom.cpp
+  src/output/cone_map_publisher.cpp
+  src/backend/cpu_backend.cpp
+  src/backend/ekf_backend.cpp
 )
 if(USE_CUDA)
-  list(APPEND CUDA_CONE_FUSED_SOURCES src/ekf_cuda.cu)
+  list(APPEND CUDA_CONE_FUSED_SOURCES src/backend/cuda_backend.cu)
 endif()
 
 add_library(${PROJECT_NAME} ${CUDA_CONE_FUSED_SOURCES})

@@ -1,4 +1,4 @@
-#include <cuda_cone_fused/ekf_cuda.hpp>
+#include <cuda_cone_fused/backend/cuda_backend.hpp>
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -83,7 +83,7 @@ __global__ void k_set_vec2(float* x, int idx, float a, float b) {
  * grown only when a scan needs more measurement rows). raw_pointer_cast hands
  * the underlying device pointer to cuBLAS / cuSOLVER.
  * ------------------------------------------------------------------------- */
-struct EkfCudaBackend::Impl {
+struct CudaBackend::Impl {
     int dim = 0;
     int cap_two_m = 0;     /* current measurement capacity (rows) */
     bool good = false;
@@ -131,7 +131,7 @@ struct EkfCudaBackend::Impl {
 };
 
 /* (Re)allocate measurement / solver scratch for a given two_m capacity. */
-bool EkfCudaBackend::Impl::alloc_scratch(int two_m) {
+bool CudaBackend::Impl::alloc_scratch(int two_m) {
     auto p_ = this;  /* for SK macro */
     try {
         H.resize((size_t)two_m * dim);
@@ -157,10 +157,10 @@ bool EkfCudaBackend::Impl::alloc_scratch(int two_m) {
     return true;
 }
 
-const char* EkfCudaBackend::lastError() const { return p_->err.c_str(); }
-bool EkfCudaBackend::ok() const { return p_->good; }
+const char* CudaBackend::lastError() const { return p_->err.c_str(); }
+bool CudaBackend::ok() const { return p_->good; }
 
-EkfCudaBackend::EkfCudaBackend(int dim, int max_two_m, float inf_init)
+CudaBackend::CudaBackend(int dim, int max_two_m, float inf_init)
     : p_(new Impl) {
     p_->dim = dim;
 
@@ -194,7 +194,7 @@ EkfCudaBackend::EkfCudaBackend(int dim, int max_two_m, float inf_init)
     p_->good = true;
 }
 
-EkfCudaBackend::~EkfCudaBackend() {
+CudaBackend::~CudaBackend() {
     if (!p_) return;
     /* device buffers free themselves (RAII); just the library handles remain */
     if (p_->solver) cusolverDnDestroy(p_->solver);
@@ -211,7 +211,7 @@ EkfCudaBackend::~EkfCudaBackend() {
  *   x_head += K nu      (gemv, op(K^T)=T)
  *   P     -= K HP       (gemm, op(K^T)=T)
  * ------------------------------------------------------------------------- */
-bool EkfCudaBackend::batchUpdateFullState(int na, const float* H, const float* R,
+bool CudaBackend::batchUpdateFullState(int na, const float* H, const float* R,
                                           const float* nu, int two_m) {
     if (!p_->good) return false;
     if (two_m > p_->cap_two_m) {
@@ -263,7 +263,7 @@ bool EkfCudaBackend::batchUpdateFullState(int na, const float* H, const float* R
 /* ----------------------------------------------------------------------------
  * Motion propagation (setPose predict step)
  * ------------------------------------------------------------------------- */
-void EkfCudaBackend::motionPropagate(int na, const float G3x3[9],
+void CudaBackend::motionPropagate(int na, const float G3x3[9],
                                      float dwx, float dwy, float dtheta,
                                      float add_xx, float add_yy, float add_yaw) {
     if (!p_->good) return;
@@ -297,30 +297,30 @@ void EkfCudaBackend::motionPropagate(int na, const float G3x3[9],
     cudaDeviceSynchronize();
 }
 
-void EkfCudaBackend::addPoseCovDiag(float dxx, float dyy, float dyaw) {
+void CudaBackend::addPoseCovDiag(float dxx, float dyy, float dyaw) {
     if (!p_->good) return;
     k_add_pose_diag<<<1, 1>>>(p_->dP(), p_->dim, dxx, dyy, dyaw);
     cudaDeviceSynchronize();
 }
 
-void EkfCudaBackend::insertLandmark(int k, float mx, float my) {
+void CudaBackend::insertLandmark(int k, float mx, float my) {
     if (!p_->good) return;
     k_set_vec2<<<1, 1>>>(p_->dx(), 3 + 2 * k, mx, my);
     cudaDeviceSynchronize();
 }
 
-void EkfCudaBackend::downloadPose3(float pose3[3]) const {
+void CudaBackend::downloadPose3(float pose3[3]) const {
     cudaMemcpy(pose3, p_->dx(), 3 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
-void EkfCudaBackend::downloadPoseCov3(float cov3[3]) const {
+void CudaBackend::downloadPoseCov3(float cov3[3]) const {
     const int dim = p_->dim;
     cudaMemcpy(&cov3[0], p_->dP() + 0,                 sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(&cov3[1], p_->dP() + (size_t)dim + 1,   sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(&cov3[2], p_->dP() + (size_t)2*dim + 2, sizeof(float), cudaMemcpyDeviceToHost);
 }
 
-void EkfCudaBackend::downloadPoseBlock3x3(float P33[9]) const {
+void CudaBackend::downloadPoseBlock3x3(float P33[9]) const {
     const int dim = p_->dim;
     /* 3x3 top-left, strided columns -> row-major out */
     float col[3];
@@ -330,16 +330,16 @@ void EkfCudaBackend::downloadPoseBlock3x3(float P33[9]) const {
     }
 }
 
-void EkfCudaBackend::downloadLandmarks(float* xy, int count) const {
+void CudaBackend::downloadLandmarks(float* xy, int count) const {
     if (count <= 0) return;
     cudaMemcpy(xy, p_->dx() + 3, (size_t)2 * count * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
-void EkfCudaBackend::uploadPose3(const float pose3[3]) {
+void CudaBackend::uploadPose3(const float pose3[3]) {
     cudaMemcpy(p_->dx(), pose3, 3 * sizeof(float), cudaMemcpyHostToDevice);
 }
 
-void EkfCudaBackend::uploadPoseBlock3x3(const float P33[9]) {
+void CudaBackend::uploadPoseBlock3x3(const float P33[9]) {
     const int dim = p_->dim;
     /* row-major in -> column-major 3x3, then strided write into P[0:3,0:3] */
     float cm[9];
@@ -351,14 +351,14 @@ void EkfCudaBackend::uploadPoseBlock3x3(const float P33[9]) {
                  3 * sizeof(float), 3, cudaMemcpyHostToDevice);
 }
 
-void EkfCudaBackend::debugSetState(const float* P, const float* x) {
+void CudaBackend::debugSetState(const float* P, const float* x) {
     const int dim = p_->dim;
     cudaMemcpy(p_->dP(), P, (size_t)dim * dim * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(p_->dx(), x, (size_t)dim * sizeof(float), cudaMemcpyHostToDevice);
     cudaDeviceSynchronize();
 }
 
-void EkfCudaBackend::debugGetState(float* P, float* x) const {
+void CudaBackend::debugGetState(float* P, float* x) const {
     const int dim = p_->dim;
     cudaMemcpy(P, p_->dP(), (size_t)dim * dim * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(x, p_->dx(), (size_t)dim * sizeof(float), cudaMemcpyDeviceToHost);

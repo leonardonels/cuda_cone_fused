@@ -3,8 +3,8 @@
     generic:
       is_colorblind: true
       
-      output_frame_id: "track"
-      output_child_frame_id: "imu_link"
+      output_frame_id: "track"           # cone-corrected map frame (NOT inherited from LIMO)
+      output_child_frame_id: ""          # empty => inherit from the FAST-LIMO input_odom_topic child_frame_id
 
       imu_topic: "/imu/data"  # or /lidar_imu       # WIP
       cones_topic: "/clusters"
@@ -64,16 +64,30 @@
       # (debug) build. Try 2 if profiling a CPU-only build of a full-size map.
       eigen_threads: 1
 
-    noises:
-      proc_noise:  [0.7, 0.3]             # (range, bearing) measurement noise: sigma range [m], sigma bearing [rad]
+      # Late-arrival window [ms] for the timestamp-ordered command drain. Inputs
+      # (LIMO predict, cone update, future IMU/GPS) are reified as commands and
+      # applied in TIMESTAMP order, not arrival order. 0 (default) applies each
+      # command immediately in stamp order with no added latency. Raising it
+      # holds the most-recent commands back by this much so a slightly-late,
+      # older-stamped measurement (e.g. a cone scan arriving after a newer LIMO
+      # frame) can slot into the correct position before being applied — at the
+      # cost of that much extra publish latency on the main path. Set just above
+      # the worst-case cone-vs-LIMO arrival skew if you see out-of-order updates.
+      late_arrival_window_ms: 0.0
 
-      # Motion process noise (the Q of the predict step), added to the pose
+    noises:
+      # Measurement noise R: (range, bearing) VARIANCES used directly on the
+      # diagonal of R (not squared internally), i.e. [var_range [m^2],
+      # var_bearing [rad^2]] — not standard deviations.
+      meas_noise:  [0.7, 0.3]
+
+      # Process noise Q (the Q of the predict step), added to the pose
       # covariance each step proportional to motion: [pos per metre travelled
       # [m^2/m], yaw per radian turned [rad^2/rad]]. This stops P from collapsing
       # to ~0 over the laps (which makes the EKF overconfident in fast_limo and
       # lets the Mahalanobis gate reject valid cones -> late-lap divergence).
       # Raise if the gate starts rejecting good cones / drift accumulates; lower
       # if the pose gets jittery. [0.0, 0.0] disables it.
-      motion_noise: [0.05, 0.02]
+      proc_noise: [0.05, 0.02]
 
       min_new_cone_distance: 1.7          # Minimum distance to create new cone

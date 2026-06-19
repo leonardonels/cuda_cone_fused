@@ -7,6 +7,11 @@ global drift of the LiDAR-inertial odometry.
 Main output: an odometric pose `/Odometry` in the `track` frame which, from the second lap
 onward, is realigned onto the cone map and therefore does not drift with FAST-LIMO.
 
+> **Code structure.** The node was refactored into a layered architecture (ROS-free
+> filter core, inbound adapters, backend Bridge, outbound publishers). See
+> **§9 Code architecture** for the map of the components and **§10 Adding an input
+> adapter** for how to plug in an IMU source.
+
 ---
 
 ## 1. ROS interface
@@ -67,7 +72,15 @@ until observed. This is what allows working only on the active sub-block (§5).
 > the *increment* of FAST-LIMO motion is applied. This way the cone correction stays in the
 > state instead of being overwritten by the raw pose at every frame.
 
-`setPose(p_k)` with $p_k = (x_k^{L}, y_k^{L}, \theta_k^{L})$ the FAST-LIMO pose:
+> **Post-refactor naming.** The old `setPose()` + `setPoseCovariance()` pair is now the single
+> sensor-agnostic `EKFOdom::predict(const MotionIncrement&)` (§9). All the LIMO-specific
+> bookkeeping below (the previous-frame reference, the first-frame seed, the quaternion→yaw
+> conversion, the 0/7/35 covariance indexing) moved **out of the filter** into
+> `LimoMotionAdapter`; the filter now consumes a ready-made `MotionIncrement` and never sees a
+> ROS message. The math is unchanged — only the boundary moved.
+
+`predict()` receives the increment built by `LimoMotionAdapter` from the FAST-LIMO pose
+$p_k = (x_k^{L}, y_k^{L}, \theta_k^{L})$:
 
 **First frame** ($\texttt{is\_pose\_initialized}=\text{false}$): only the reference is
 recorded, the state stays at the origin.
@@ -111,7 +124,7 @@ cross-covariances**; without it, $\mathbf{P}$ would grow only on its diagonal an
 would distribute badly between $x,y,\theta$. Only the active sub-block is touched (inactive
 landmarks are decoupled), so the cost is $O(n_a)$.
 
-**Covariance — additive, motion-based process noise** (`setPose`, `noises.motion_noise`):
+**Covariance — additive, motion-based process noise** (`predict`, `noises.proc_noise`):
 right after the $G\mathbf{P}G^\top$ propagation, **pose uncertainty is injected proportional to
 how far the vehicle moved** this step:
 
@@ -124,7 +137,7 @@ $$
 This is the $Q$ term of the *predict* step and it is the **critical** part: without it,
 $\mathbf{P}$ can only **shrink** (cone corrections reduce it, nothing makes it grow back) and
 collapses to $\sim 0$ after a few laps. With $\mathbf{P}$ collapsed the filter becomes
-**overconfident** in the FAST-LIMO-propagated pose: $S = H\mathbf{P}H^\top + Q$ becomes tiny
+**overconfident** in the FAST-LIMO-propagated pose: $S = H\mathbf{P}H^\top + R$ becomes tiny
 and the **Mahalanobis gate** (§4.4) starts **rejecting the very cones** that would correct the
 accumulated drift → map divergence in the late laps. Scaling the noise with the
 travelled distance/rotation (rather than a constant per-scan term) mirrors how odometry error
@@ -141,22 +154,27 @@ $$
 
 The clamp to $\ge 0$ prevents an occasional drop in FAST-LIMO's covariance (e.g. its own
 relocalization) from improperly shrinking $\mathbf{P}$: the shrinking must come **only** from
-the cones, in `correct()`. Together, the three steps realize the classic
+the cones, in `update()`. Together, the three steps realize the classic
 $\mathbf{P}\leftarrow G\mathbf{P}G^\top + Q_{\text{motion}}$, where $Q_{\text{motion}}$ is the
 sum of the motion-based term (above, the primary and reliable source) and the FAST-LIMO
 increment.
 
-> **Note.** There is also a `predict(dt)` with a velocity/angular-velocity kinematic model
-> ($v$, $\omega$), but it is **not wired** in the current pipeline (`setActVel`/`setActAngVel`
-> are never called). Prediction is done entirely by the relative increment above. The method
-> is left for possible future use with an IMU/encoder.
+> **Note.** `predict()` is sensor-agnostic: it absorbs any `MotionIncrement`, not just the
+> LIMO one. A second motion source (e.g. an IMU integrating $v$, $\omega$ over $\Delta t$) plugs
+> in by emitting its own increment from a new adapter — see §10. The relative LIMO increment
+> above is currently the only wired motion source.
 
 ---
 
 ## 4. Correction step (cones)
 
-`correct(z, M)` receives $M$ observations $z_i = (\rho_i, \phi_i, c_i)$ = range, bearing,
-color, computed in `conesCallback` from the cluster points:
+> **Post-refactor naming.** `correct()` is now `EKFOdom::update(const std::vector<Observation>&)`
+> (§9). The vehicle-frame→polar translation and the colour→signature mapping moved **out of the
+> filter** into `ConeObsAdapter` (the latter via an injected `IColorClassifier` Strategy); the
+> filter now consumes ready-made `Observation`s. The math is unchanged.
+
+`update()` receives $M$ observations $z_i = (\rho_i, \phi_i, c_i)$ = range, bearing,
+color, built by `ConeObsAdapter` from the cluster points:
 
 $$
 \rho_i = \sqrt{p_x^2 + p_y^2}, \qquad \phi_i = \operatorname{wrap}\!\big(\operatorname{atan2}(p_y, p_x)\big)
@@ -210,13 +228,13 @@ $k$): $H = {}^{low}H \, F_{x,k}$.
 ### 4.3 Kalman update
 
 $$
-S = H\,\mathbf{P}\,H^\top + Q \;(2\times2), \qquad
+S = H\,\mathbf{P}\,H^\top + R \;(2\times2), \qquad
 K = \mathbf{P}\,H^\top S^{-1}, \qquad
 \mathbf{x} \mathrel{+}= K\,(z - \hat z), \qquad
 \mathbf{P} \leftarrow \mathbf{P} - K\,(H\mathbf{P})
 $$
 
-where $Q$ = `proc_noise` (see §6, non-standard naming). The $\mathbf{P}$ update is written
+where $R$ = `meas_noise` (the measurement noise; see §6). The $\mathbf{P}$ update is written
 as $\mathbf{P} - K(H\mathbf{P})$, algebraically identical to $(I-KH)\mathbf{P}$ but in $O(n_a^2)$
 instead of $O(n^3)$ (§5).
 
@@ -351,7 +369,8 @@ backend** offloads the heavy linear algebra:
 - **Compile-time switch** (cuBLAS/cuSOLVER vs Eigen), *not* a runtime parameter. Built only with
   `-DUSE_CUDA=ON` (**default ON**). `OFF` → the original CPU-only build with no CUDA dependency —
   the debug backend, "like before".
-- `EkfCudaBackend` (`include/cuda_cone_fused/ekf_cuda.hpp`, `src/ekf_cuda.cu`) keeps **$\mathbf{P}$
+- `CudaBackend` (`include/cuda_cone_fused/backend/cuda_backend.hpp`, `src/backend/cuda_backend.cu`),
+  one of the two `IEkfBackend` peers (§9), keeps **$\mathbf{P}$
   ($n\times n$) and $\mathbf{x}$ resident on the device** for the whole run (allocated/initialised
   once; `thrust::device_vector`, RAII). The $n\times n$ covariance never crosses the bus.
 - **On device** (cuBLAS + cuSOLVER): the batch full-state update
@@ -360,7 +379,7 @@ backend** offloads the heavy linear algebra:
   through $G$, additive noise, pose compose), and the `setPoseCovariance` increments.
 - **On CPU** (cheap, branchy): data association, color logic, marker building. `EKFOdom` keeps
   **host mirrors** of $\mathbf{x}$ (active head) and the $3\times3$ pose block of $\mathbf{P}$ —
-  the only parts the CPU reads — refreshed by `syncFromDevice()`. Per scan only tiny slices move:
+  the only parts the CPU reads — refreshed by `syncFromBackend()`. Per scan only tiny slices move:
   $H/R/\nu$ up; pose, $3\times3$ cov and landmark means down.
 - In GPU mode all corrections go through the **joint (batch)** path by necessity (the device holds
   the authoritative $\mathbf{P}$, so a single-cone CPU update would read a stale host copy) — it
@@ -385,23 +404,24 @@ colcon build --packages-select cuda_cone_fused --cmake-args -DUSE_CUDA=OFF    # 
 
 ## 6. Parameter tuning (`config/config.yaml`)
 
-> ⚠️ **Non-standard naming.** In the code the two noises are mapped the opposite way compared
-> to the EKF convention, and they are used as **variance** (the square is commented out, so the
-> entered value is $\sigma^2$, not $\sigma$, despite the comments saying "Sigma"):
-> - `noises.proc_noise` → matrix $Q$ (2×2), **measurement innovation covariance** in `correct()`.
-> - `noises.meas_noise` → matrix $R$ (3×3), process noise of `predict()` → **currently inert** (predict is not called).
+> ℹ️ **Noise convention.** The two noises follow the standard EKF naming, and both are entered
+> as **variance** (the values go straight onto the covariance diagonal — they are *not* squared
+> internally, so enter $\sigma^2$, not $\sigma$):
+> - `noises.meas_noise` → matrix $R$ (2×2), the **measurement noise** added to the innovation
+>   covariance $S = H\mathbf{P}H^\top + R$ in `update()`.
+> - `noises.proc_noise` → the **process noise** $Q$ of the `predict()` step (additive pose
+>   covariance, scaled with travelled distance / turn).
 
 | Parameter | Effect | How to tune |
 |---|---|---|
-| `noises.proc_noise` `[var_range, var_bearing]` | How much the filter trusts the cones. It is the $Q$ in $S=HPH^\top+Q$. **Large** → cones less credible → soft corrections, slow anchoring, less jitter. **Small** → aggressive corrections, fast anchoring, more jitter and risk of divergence under wrong associations. | Start at `[0.1, 0.1]`. If the cones "jitter"/the pose snaps from lap 2, **increase**. If the anchor is too slow to recover the drift, **decrease**. `var_bearing` in rad²: 0.1 ≈ σ≈18°, fairly wide. |
-| `noises.motion_noise` `[q_pos, q_yaw]` | Additive, motion-based process noise (§3): $P_{xx},P_{yy} \mathrel{+}= q_{\text{pos}}\cdot\lVert\Delta\rVert$, $P_{\theta\theta}\mathrel{+}= q_{\text{yaw}}\cdot\lvert\Delta_\theta\rvert$ each step. It is the $Q$ of the *predict* step and prevents $\mathbf{P}$ from **collapsing** lap after lap (which would make the filter overconfident and have the Mahalanobis gate reject good cones → late divergence). **Large** → $\mathbf{P}$ stays higher → pose more reactive to the cones but more jitter. **Small/0** → $\mathbf{P}$ collapses, gate too selective, drift in the late laps. | Start at `[0.05, 0.02]` (`q_pos` in m²/m, `q_yaw` in rad²/rad). In the diagnostic log `Pyy` should settle to a **small but non-zero** value (~0.01–0.05) instead of decaying toward ~0.0008, and `corrected` should track `detected` even in laps 7–8. If drift persists, **raise**; if the pose gets jittery, **lower**. Note: `setPose` runs at the FAST-LIMO rate (~100 Hz), so the term accumulates over many steps between cone scans. |
-| `noises.meas_noise` `[x,y,yaw]` | $R$ of `predict()`. **Inert** until `predict()` is wired. | Leave as is; relevant only if the velocity model is enabled. |
+| `noises.meas_noise` `[var_range, var_bearing]` | How much the filter trusts the cones. It is the $R$ in $S=HPH^\top+R$. **Large** → cones less credible → soft corrections, slow anchoring, less jitter. **Small** → aggressive corrections, fast anchoring, more jitter and risk of divergence under wrong associations. | Start at `[0.1, 0.1]`. If the cones "jitter"/the pose snaps from lap 2, **increase**. If the anchor is too slow to recover the drift, **decrease**. `var_bearing` in rad²: 0.1 ≈ σ≈18°, fairly wide. |
+| `noises.proc_noise` `[q_pos, q_yaw]` | Additive, motion-based process noise (§3): $P_{xx},P_{yy} \mathrel{+}= q_{\text{pos}}\cdot\lVert\Delta\rVert$, $P_{\theta\theta}\mathrel{+}= q_{\text{yaw}}\cdot\lvert\Delta_\theta\rvert$ each step. It is the $Q$ of the *predict* step and prevents $\mathbf{P}$ from **collapsing** lap after lap (which would make the filter overconfident and have the Mahalanobis gate reject good cones → late divergence). **Large** → $\mathbf{P}$ stays higher → pose more reactive to the cones but more jitter. **Small/0** → $\mathbf{P}$ collapses, gate too selective, drift in the late laps. | Start at `[0.05, 0.02]` (`q_pos` in m²/m, `q_yaw` in rad²/rad). In the diagnostic log `Pyy` should settle to a **small but non-zero** value (~0.01–0.05) instead of decaying toward ~0.0008, and `corrected` should track `detected` even in laps 7–8. If drift persists, **raise**; if the pose gets jittery, **lower**. Note: `setPose` runs at the FAST-LIMO rate (~100 Hz), so the term accumulates over many steps between cone scans. |
 | `noises.min_new_cone_distance` ($\alpha$) [m] | Euclidean threshold to create a new cone **only in lap 1** (§4.1). **Large** → fewer new cones (risk of merging distinct cones). **Small** → more cones (risk of duplicates from noise). From lap 2 association uses `assoc_maha_gate` instead. | Set it **below half** the minimum spacing between adjacent cones on track and **above** the per-frame position noise. |
 | `generic.assoc_maha_gate` | Chi-square gate (2 DoF) for the Mahalanobis association from lap 2 (§4.1/§4.4): accept if $d^2=\nu^\top S^{-1}\nu \le$ gate. Replaces the fixed Euclidean radius with an **uncertainty-adaptive** capture region. **High** → keeps correcting under larger drift (but more risk of wrong associations); **low** → more aggressive rejection. | `5.99`=95%, `9.21`=99%, `13.8`=99.9%. If the pose "slides" and the red (debug) cones stop landing on the map on far stretches, **raise** the gate; if jumps from wrong associations appear, **lower** it. |
 | `generic.cone_time_seen_th` | How many times a cone must be observed before entering the published/frozen map. **High** → cleaner map but cones that appear late. | `4` is a good compromise; raise if you see spurious cones, lower if the map populates too slowly. |
 | `generic.cones_pub_for_debug` | `true` → publishes the EKF's **live** map even after lap 1 (debug). `false` → publishes the **frozen** map. | Keep `false` in a race. In debug, remember the live one moves (the associated cones are still corrected by the filter). |
 | `generic.pub_input_cones_debug` | `true` → publishes on `input_cones_debug_topic` the raw input cones projected into the map frame with the current EKF pose (**red** markers). | Debug tool: the red ones should land on the mapped cones; if they "slide away" the pose is drifting. Keep `false` in a race. |
-| `generic.batch_cone_update` | Correction mode (§4.5). `false` → update on the last cone/scan only (default, cheap, stable). `true` → **joint** update over all associated cones (more information, less "nervous" pose). | Leave `false` as baseline; set `true` for the A/B test. If the pose becomes unstable in batch, raise `noises.proc_noise` (the $Q$ in $S$): the joint update is more aggressive because it fuses more measurements. |
+| `generic.batch_cone_update` | Correction mode (§4.5). `false` → update on the last cone/scan only (default, cheap, stable). `true` → **joint** update over all associated cones (more information, less "nervous" pose). | Leave `false` as baseline; set `true` for the A/B test. If the pose becomes unstable in batch, raise `noises.meas_noise` (the $R$ in $S$): the joint update is more aggressive because it fuses more measurements. |
 | `generic.freeze_pose_first_lap` | Lap-1 pose handling (§5). `true` (default) → **freeze the pose**: trust FAST-LIMO completely, cones only build the map. `false` → **full SLAM in lap 1**: cones also correct the pose while mapping, so LIMO drift is anchored as the map is built (esp. at loop closure). | Keep `true` if lap-1 LIMO is clean. Switch to `false` if you see the map **smear/duplicate** during lap 1 (LIMO drift baked in). Watch out: with `false`, a wrong association in the sparse early map can corrupt the pose (no Mahalanobis gate in lap 1) — if lap 1 gets *worse*, revert. |
 | `generic.freeze_map` | Map handling from lap 2 (§5). `true` (default) → **rigid map**: pose-only localization, landmarks fixed, gauge locked (no slow map rotation). `false` → **continuous SLAM**: keep correcting pose *and* landmark positions (legacy; refines the map but can let it slowly rotate over laps). No new cones are added after lap 1 either way. | Keep `true` for multi-lap races (gauge stability). Use `false` only for A/B tests or short runs where map refinement matters more than long-horizon stability. If you enable it and the map starts rotating after a few laps, that's the expected gauge drift — switch back to `true`. |
 | `generic.is_colorblind` | `true` → all cones treated as yellow (color ignored in association). | Leave `true` if the color from the perceptor is unreliable. |
@@ -430,45 +450,145 @@ colcon build --packages-select cuda_cone_fused --cmake-args -DUSE_CUDA=OFF    # 
 
 ---
 
-## 8. Known limitations / TODO
+## 8. Code architecture (post-refactor)
 
-- **Single-cone update per frame** (`i == M-1`, default): under-constrains the pose (a single
-  fixed range/bearing measurement, ~2 DoF out of 3), depends on detection order and makes the
-  corrections "nervous". An alternative **batch (joint)** path is available behind the flag
-  `generic.batch_cone_update` (§4.5) which fuses all of the frame's associations in a single
-  update, reducing variance by ~$1/M$. ⚠️ A naive *sequential* update (M separate updates per
-  scan) **diverges** — it shrinks $\mathbf{P}$ by ~$M$ times per scan, making the filter
-  overconfident: that's why the fusion is done in **joint** form (a single covariance
-  reduction), not sequentially.
-- **Single-lap map** (default): with the rigid anchor from lap 2 (§5) the map is the one built
-  in lap 1 **only** and is no longer refined. It's a deliberate trade-off (it fixes the gauge
-  and eliminates the slow map rotation), but any lap-1 mapping errors remain: if lap 1 is noisy,
-  it's better to improve detection/association upstream than to reopen the landmark corrections
-  (which would reintroduce the rotational drift). This can be toggled with
-  `generic.freeze_map: false` to re-enable continuous landmark refinement, accepting the gauge
-  drift as the cost — see §5.
-- **`predict()` disconnected**: the velocity model is dormant code.
-- **Dead member `Fx_k`**: replaced by the local `Fx_k_a` in `correct()`; removable.
-- **Inverted noise naming** and used as variance: see §6.
+The node was refactored from a monolith into a **layered architecture**: translate at the
+edges, estimate in a ROS-free core, orchestrate in the node. Every component touches ROS **or**
+the domain, never both. This section is the map of *what lands where*.
+
+```
+[ROS topics]                                          [ROS topics / TF]
+     │                                                       ▲
+     ▼                                                       │
+ INBOUND ADAPTERS              FILTER CORE              OUTBOUND PUBLISHERS
+ (ROS msg → domain)            (ROS-free)               (domain → ROS msg)
+ ─────────────────             ───────────────          ───────────────────
+ LimoMotionAdapter ─predict─▶                  ──────▶  OdometryPublisher
+ ConeObsAdapter    ─update──▶  EKFOdom         ──────▶  ConeMapPublisher
+ (ImuMotionAdapter)─predict─▶  predict()/update()
+                                      │
+                                      ▼
+                              IEkfBackend  (Bridge: CpuBackend | CudaBackend)
+
+              THE NODE (ConeFusion) = orchestrator (Mediator / Facade):
+        composition root · timestamp-ordered drain · input-owned publish policy
+```
+
+### Layout
+
+| Layer | Files | Role |
+|---|---|---|
+| **Filter I/O types** | `ekf_types.hpp` | `MotionIncrement` / `Observation` — the *only* things crossing the filter boundary. ROS-free, stamp is a plain `uint64_t` ns. |
+| **Filter core** | `ekf_odom.hpp` / `.cpp` | `EKFOdom`: `predict(MotionIncrement)` (was `setPose`+`setPoseCovariance`), `update(vector<Observation>)` (was `correct`), plus plain state getters. Keeps only small **host mirrors** (pose, active landmark means, 3×3 pose-cov); the authoritative state lives in the backend. |
+| **Backend Bridge** | `backend/ekf_backend.hpp`, `backend/cpu_backend.*`, `backend/cuda_backend.*` | `IEkfBackend` with `CpuBackend` and `CudaBackend` as **peers**. The backend owns the authoritative full `x` and `dim×dim` `P`; the heavy joint update is dispatched to `batchUpdateFullState()`. `makeEkfBackend(dim, max_two_m, inf_init)` is the **single** place `USE_CUDA` is still consulted (§5). |
+| **Inbound adapters** | `input/limo_motion_adapter.hpp`, `input/cone_obs_adapter.hpp`, `input/color_classifier.hpp` | One per sensor; `convert(ROS msg) → domain`. `LimoMotionAdapter` now owns *all* the LIMO bookkeeping; `ConeObsAdapter` does vehicle-frame→polar and delegates colour→signature to an injected `IColorClassifier` (Strategy + `makeColorClassifier` Factory). |
+| **Command queue** | `input/filter_command.hpp` | `FilterCommand` (reified `Predict`/`Update`) + `CommandQueue`: a `multimap` sorted by stamp. `drainUpTo(horizon, filter)` applies commands in **timestamp order**, not arrival order (fixes the out-of-sequence-measurement problem). |
+| **Outbound publishers** | `output/odometry_publisher.hpp`, `output/cone_map_publisher.*` | Mirror of an adapter: `publish(filter, stamp) → ROS msg`. `OdometryPublisher` (pose → `Odometry`+TF) is **triggered by FAST-LIMO**; `ConeMapPublisher` (map → `Marker`) is **triggered by cones** and owns the lap-freeze latch (it calls `setFirstLapCompleted`). Both stamp with the **source** timestamp, never `now()`. |
+| **Node / orchestrator** | `cuda_cone_fused.hpp` / `.cpp`, `cuda_cone_fused_node.cpp` | `ConeFusion`: builds everything (composition root), converts each callback's message to a `FilterCommand`, enqueues, drains in stamp order, and lets each **main** input trigger its output. No translation or estimator logic lives here. |
+
+### Key invariants the structure enforces
+
+- **The filter imports zero ROS headers** on either boundary. If a translation creeps into
+  `EKFOdom`, the split is wrong — push it into an adapter (input) or a publisher (output).
+- **One update code path.** The `#ifdef USE_CUDA` braiding that used to interleave CPU
+  single-cone and GPU batch updates is gone: both backends are peers behind `IEkfBackend`, and
+  `update()` always dispatches the joint solve to `batchUpdateFullState()`.
+- **`predict()` is never a silent no-op** — a missing motion model fails by *slow divergence*,
+  not a loud error.
+- **Main vs optional is an orchestration property, not an adapter one** (see §10).
 
 ---
 
-## 9. Data flow (summary)
+## 9. Adding an input adapter (IMU)
+
+Adapters are **structurally identical** — the asymmetry between a "main" and an "optional"
+sensor lives one layer up, in the node callback, not in the adapter. To add a sensor you write
+one small translation class and wire one callback. There are two adapter shapes:
+
+- **Motion source** (IMU, wheel encoders) → `MotionIncrement` → `EKFOdom::predict()`.
+- **Correction source** (a second cone detector) → `Observation`s → `EKFOdom::update()`.
+
+And two orchestration roles:
+
+- **Main input** — owns an output and triggers it (enqueue → drain → **publish**). LIMO and
+  cones are the two mains today.
+- **Optional input** — pure state enrichment; emits nothing (**enqueue only**, no drain, no
+  publish). Its correction rides out on the next main publish (≤ ~11 ms later at 90 Hz).
+
+### Recipe
+
+1. **Write the adapter** in `include/cuda_cone_fused/input/`, mirroring an existing one. A
+   motion adapter looks like `LimoMotionAdapter` (returns `std::optional<MotionIncrement>` so it
+   can swallow its first frame while it seeds a reference); a correction adapter looks like
+   `ConeObsAdapter` (returns `std::vector<Observation>`). **Keep all ROS↔domain translation and
+   all sensor bookkeeping inside the adapter** — the filter must stay ROS-free.
+2. **Declare the topic param** in `loadParameters()` (an `imu_topic` is already declared and
+   plumbed as a member, just unused) and add the subscriber + an adapter member to `ConeFusion`.
+3. **Wire the callback.** Convert → `FilterCommand::makePredict/​makeUpdate` → `cmd_queue_.push`.
+   For a **main** input, then `drainQueue()` and call the owned publisher. For an **optional**
+   input, **stop after the push** — do not drain or publish.
+
+### IMU adapter (optional, motion) — worked example
+
+```cpp
+// include/cuda_cone_fused/input/imu_motion_adapter.hpp
+class ImuMotionAdapter {
+public:
+  std::optional<MotionIncrement> convert(const sensor_msgs::msg::Imu& m) {
+    // integrate gyro/accel over Δt since the previous sample → local dx,dy,dθ
+    MotionIncrement inc;
+    inc.delta_pose    = /* integrated local increment */;
+    inc.cov_increment = /* MUST grow with Δt: cov ∝ Δt (see caveat 1) */;
+    inc.stamp_ns      = toNs(m.header.stamp);
+    return inc;          // nullopt on the first sample (seeds the Δt reference)
+  }
+};
+```
+
+```cpp
+// in ConeFusion: subscribe to imu_topic, then —
+void ConeFusion::imuCallback(sensor_msgs::msg::Imu::SharedPtr m) {
+  if (auto inc = imu_adapter_.convert(*m))
+    cmd_queue_.push(FilterCommand::makePredict(*inc));
+  // OPTIONAL input → enqueue only. No drain, no publish: the IMU enriches the
+  // state; its effect ships out on the next FAST-LIMO odom publish.
+}
+```
+
+One **motion-model** requirement (a correctness invariant, not adapter style):
+
+1. **IMU increment covariance must grow with integration time** (`cov ∝ Δt`). A fixed small
+   covariance recreates the overconfidence / `P`-collapse failure that makes the Mahalanobis
+   gate reject good cones (§3).
+
+---
+
+## 10. Data flow (summary)
+
+Each callback **converts** its message to a `FilterCommand`, **enqueues** it, and (for a main
+input) **drains in timestamp order** before publishing — see §9–§10.
 
 ```
-/fast_limo/state ──▶ fastLimoDataCallback
-                      ├─ setPose()            : x ⊕= relative LIMO increment   (predict)
-                      │                          P[pose] ← G P Gᵀ + Q_motion(|Δ|)  (process noise)
-                      ├─ setPoseCovariance()  : P[pose] += ΔcovLIMO  (clamp ≥0)
-                      └─ updatePose()         : publishes /Odometry from getState() (high rate)
+/fast_limo/state ──▶ fastLimoDataCallback        (MAIN motion)
+                      ├─ limo_adapter_.convert()  : Odometry → MotionIncrement (relative; nullopt on 1st frame)
+                      ├─ cmd_queue_.push(Predict) ─┐
+                      ├─ drainQueue()  ────────────┤ stamp-ordered: predict() / update()
+                      │   └─ EKFOdom::predict()    │   x ⊕= incr; P[pose] ← G P Gᵀ + Q_motion(|Δ|) + ΔcovLIMO
+                      └─ odom_out_.publish()       : /Odometry + TF from getState() (high rate, source-stamped)
 
-/clusters ──────────▶ conesCallback
-                      ├─ correct()                 : NN association + innovation wrapping +
-                      │                               Mahalanobis gate + Kalman update (active block)
-                      │                               (lap 1: K[pose]=0 → mapping only;
-                      │                                lap 2: full K → anchors the pose, no new cones)
-                      └─ pubConesMarkers()         : publishes cones seen ≥ cone_time_seen_th times
-                                                      (live map in debug/lap 1, or frozen)
+/clusters ──────────▶ conesCallback              (MAIN correction)
+                      ├─ cone_adapter_.convert()  : Marker → vector<Observation> (polar + IColorClassifier signature)
+                      ├─ cmd_queue_.push(Update)  ─┐
+                      ├─ drainQueue()  ────────────┤ stamp-ordered drain
+                      │   └─ EKFOdom::update()     │   NN/Mahalanobis assoc + innovation wrap + joint Kalman update
+                      │                            │   (lap 1: K[pose]=0 → mapping only; lap 2+: anchors pose, no new cones)
+                      └─ cone_map_out_.publish()   : cones seen ≥ cone_time_seen_th; owns the lap-freeze latch
+                                                     (→ setFirstLapCompleted on rollover)
 
-/planning/race_status ─▶ raceStatusCallback   : current_lap → setFirstLapCompleted(lap>1)
+/planning/race_status ─▶ raceStatusCallback       : stores current_lap (drives the freeze latch in ConeMapPublisher)
+
+(optional inputs — e.g. IMU — would push to cmd_queue_ and STOP: no drain, no publish; §9)
+
+            authoritative x, P  ◀────────────────  IEkfBackend (CpuBackend | CudaBackend)
+            (host mirrors in EKFOdom: pose, active landmark means, 3×3 pose cov)
 ```
