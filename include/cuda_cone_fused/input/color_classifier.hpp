@@ -35,10 +35,10 @@ public:
       return blueCone;
     } else if (color.r > 0.9f && color.g > 0.9f && color.b < 0.1f) {
       return yellowCone;
-    } else if (color.r > 0.9f && color.g > 0.3f && color.b < 0.1f) {
-      return orangeCone;        /* small orange (green ~0.31) */
     } else if (color.r > 0.9f && color.g > 0.6f && color.b < 0.1f) {
       return orangeBigCone;     /* big orange (green ~0.63) */
+    } else if (color.r > 0.9f && color.g > 0.3f && color.b < 0.1f) {
+      return orangeCone;        /* small orange (green ~0.31) */
     }
     return 255;                 /* unknown -> ignored by ColorLogic voting */
   }

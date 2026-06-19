@@ -32,7 +32,7 @@ private:
   bool is_colorblind;
 
   /* Subscriptions topics' names */
-  std::string cones_topic, imu_topic, input_odom_topic, race_status_topic,
+  std::string cones_topic, input_odom_topic, race_status_topic,
       mapped_cones_topic, output_odom_topic,
       output_frame_id, output_child_frame_id;
 
@@ -51,11 +51,6 @@ private:
 
   /* Enable logging parameter */
   bool enable_logging;
-
-  /* If SKIDPAD mission is selected, the EKF can publish FAST_LIMO odometry even
-   * if no cones are seen (currently odom is always published on the LIMO trigger,
-   * so this only documents intent). */
-  bool is_skidpad_mission = false;
 
   /* Actual Race status (current lap drives the lap-freeze latch). */
   mmr_base::msg::RaceStatus race_status;

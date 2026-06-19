@@ -157,6 +157,13 @@ size_t EKFOdom::update(const std::vector<Observation>& obs) {
             if (this->max_new_cone_dist < min_dist)
             {
                 /* New cone */
+                if (this->landmark_count >= N_CONES)
+                {
+                    /* Map is full: allocating another landmark would overrun the
+                       fixed-size state (x_), backend P/x, and signature (s_)
+                       buffers, all sized for N_CONES. Drop the observation. */
+                    continue;
+                }
                 k = this->landmark_count;
                 this->landmark_count++;
                 this->x_.segment(3 + (2*k), 2) = tmp_cone;

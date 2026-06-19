@@ -10,8 +10,8 @@
 #include <memory>
 #include <vector>
 
-#define N_CONES 400           /* This constant is the initial cones number. */
-#define INF 1e1       /* 1e10 Constant value to represent Infinite */
+#define N_CONES 400           
+#define INF 1e9       
 
 using namespace Eigen;
 

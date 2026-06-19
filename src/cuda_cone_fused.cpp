@@ -44,9 +44,8 @@ void ConeFusion::loadParameters() {
   declare_parameter("is_colorblind", true);
 
   declare_parameter("generic.output_frame_id", "track");
-  declare_parameter("generic.output_child_frame_id", "imu_link");
+  declare_parameter("generic.output_child_frame_id", "");
 
-  declare_parameter("generic.imu_topic", "/imu/data");
   declare_parameter("generic.cones_topic", "/clusters");
   declare_parameter("generic.input_odom_topic", "/fast_limo/state");
   declare_parameter("generic.race_status_topic", "/planning/race_status");
@@ -56,7 +55,6 @@ void ConeFusion::loadParameters() {
 
   declare_parameter("generic.enable_logging", false);
   declare_parameter("generic.cone_time_seen_th", 10);
-  declare_parameter("generic.is_skidpad_mission", false);
 
 #ifdef CONE_FUSED_DEBUG
   /* Debug-only parameters (compiled in only with -DDEBUG=ON). */
@@ -78,8 +76,8 @@ void ConeFusion::loadParameters() {
   declare_parameter("generic.late_arrival_window_ms", 0.0);
 
   /* Declare Sensor Noise parameters */
-  declare_parameter<std::vector<double>>("noises.meas_noise", std::vector<double>{0.0, 0.0});
-  declare_parameter<std::vector<double>>("noises.proc_noise", std::vector<double>{0.0, 0.0});
+  declare_parameter<std::vector<double>>("noises.meas_noise", std::vector<double>{0.7, 0.3});
+  declare_parameter<std::vector<double>>("noises.proc_noise", std::vector<double>{0.05, 0.02});
   declare_parameter("noises.min_new_cone_distance", 2.0);
 
   /* Get Parameters */
@@ -88,7 +86,6 @@ void ConeFusion::loadParameters() {
   get_parameter("generic.output_frame_id", this->output_frame_id);
   get_parameter("generic.output_child_frame_id", this->output_child_frame_id);
 
-  get_parameter("generic.imu_topic", this->imu_topic);
   get_parameter("generic.cones_topic", this->cones_topic);
   get_parameter("generic.input_odom_topic", this->input_odom_topic);
   get_parameter("generic.race_status_topic", this->race_status_topic);
@@ -97,7 +94,6 @@ void ConeFusion::loadParameters() {
   get_parameter("generic.output_odom_topic", this->output_odom_topic);
 
   get_parameter("generic.enable_logging", this->enable_logging);
-  get_parameter("generic.is_skidpad_mission", this->is_skidpad_mission);
 
 #ifdef CONE_FUSED_DEBUG
   get_parameter("generic.cones_pub_for_debug", this->cones_pub_for_debug);
@@ -111,8 +107,6 @@ void ConeFusion::loadParameters() {
   get_parameter("generic.late_arrival_window_ms", this->late_arrival_window_ms);
   this->late_arrival_window_ns =
       static_cast<uint64_t>(this->late_arrival_window_ms * 1e6);
-
-  std::cout << "IS_SKIDPAD: " << this->is_skidpad_mission << "\n";
 
   /* Get Sensor Noise parameters */
   get_parameter("noises.meas_noise", tmp_meas_noise);

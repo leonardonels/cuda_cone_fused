@@ -6,7 +6,6 @@
       output_frame_id: "track"           # cone-corrected map frame (NOT inherited from LIMO)
       output_child_frame_id: ""          # empty => inherit from the FAST-LIMO input_odom_topic child_frame_id
 
-      imu_topic: "/imu/data"  # or /lidar_imu       # WIP
       cones_topic: "/clusters"
       input_odom_topic: "/fast_limo/state"
       race_status_topic: "/planning/race_status"
@@ -16,7 +15,6 @@
 
       enable_logging: true
       cone_time_seen_th: 10
-      is_skidpad_mission: false
 
       # --- DEBUG-only parameters -------------------------------------------
       # The following take effect ONLY in a debug build (cmake -DDEBUG=ON, which
