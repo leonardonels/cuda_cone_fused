@@ -31,7 +31,7 @@ ConeFusion::ConeFusion() : rclcpp::Node("cuda_cone_fused_node") {
 
   /* Create subscriptions */
   this->cones_sub = this->create_subscription<visualization_msgs::msg::Marker>(this->cones_topic, 100,std::bind(&ConeFusion::conesCallback, this, std::placeholders::_1));
-  this->fast_limo_odom_sub = this->create_subscription<nav_msgs::msg::Odometry>(this->input_odom_topic, 1,std::bind(&ConeFusion::fastLimoDataCallback, this, std::placeholders::_1));
+  this->fast_limo_odom_sub = this->create_subscription<nav_msgs::msg::Odometry>(this->input_odom_topic, 10,std::bind(&ConeFusion::fastLimoDataCallback, this, std::placeholders::_1));
   this->race_status_sub = this->create_subscription<mmr_base::msg::RaceStatus>(this->race_status_topic, 1, std::bind(&ConeFusion::raceStatusCallback, this, std::placeholders::_1));
 
   /* Init race status */
