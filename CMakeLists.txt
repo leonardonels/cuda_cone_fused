@@ -11,8 +11,6 @@ if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 20)
 endif()
 
-# Host (C++) flags only — guarded so they are NOT passed to nvcc, which does not
-# understand -march=native / -Wpedantic directly.
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wall>
                       $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
@@ -22,24 +20,13 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 # ----------------------------------------------------------------------------
-# Optional GPU (CUDA) EKF backend.
-#   cmake ... -DUSE_CUDA=ON      -> compile src/ekf_cuda.cu, link cuBLAS/cuSOLVER,
-#                                   define USE_CUDA so EKFOdom routes the heavy
-#                                   update onto the GPU.
-#   (default OFF)                -> pure CPU build, identical to before, with no
-#                                   CUDA toolchain dependency (the debug backend).
+# Optional GPU (CUDA) EKF backend. ON by Default.
 # ----------------------------------------------------------------------------
 option(USE_CUDA "Build the resident-state GPU EKF backend (needs CUDA toolkit)" ON)
 set(CUDA_CONE_FUSED_CUDA_ARCH "87" CACHE STRING "CUDA arch for the GPU backend (Orin = 87)")
 
 # ----------------------------------------------------------------------------
-# Optional debug instrumentation.
-#   cmake ... -DDEBUG=ON  -> define CONE_FUSED_DEBUG so the node compiles in the
-#                            debug-only publishers/topics (raw input-cone overlay
-#                            and the live-map republish). The matching node
-#                            parameters (cones_pub_for_debug, pub_input_cones_debug,
-#                            input_cones_debug_topic) are only read in this build.
-#   (default OFF)         -> the debug publishers are compiled out entirely.
+# Optional debug outputs: prints and topics. OFF by Default.
 # ----------------------------------------------------------------------------
 option(DEBUG "Compile in the debug-only cone publishers/topics" OFF)
 if(DEBUG)
