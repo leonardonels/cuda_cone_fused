@@ -11,7 +11,13 @@
 #include <vector>
 
 #define N_CONES 400           
-#define INF 1e9       
+/* New-landmark prior variance ("uninformative" init).
+   The float32 covariance update P -= K(HP) computes INF - (~INF) for a fresh
+   landmark, so a huge INF (e.g. 1e9, ULP ~128 in float32) is swallowed by
+   catastrophic cancellation -> negative/garbage variance -> indefinite P ->
+   NaN in the resident GPU state on the very first scan. 1e1 (~3.2 m std) is
+   uninformative enough yet numerically safe. */
+#define INF 1e1
 
 using namespace Eigen;
 
