@@ -30,9 +30,17 @@ set(CUDA_CONE_FUSED_CUDA_ARCH "87" CACHE STRING "CUDA arch for the GPU backend (
 # ----------------------------------------------------------------------------
 option(DEBUG "Compile in the debug-only cone publishers/topics" OFF)
 if(DEBUG)
-  message(STATUS "cuda_cone_fused: DEBUG publishers ENABLED (CONE_FUSED_DEBUG)")
+  message(
+      "============================================================\n"
+      "-- DEBUG publishers ENABLED (CONE_FUSED_DEBUG)\n"
+      "============================================================\n"
+  )
 else()
-  message(STATUS "cuda_cone_fused: DEBUG publishers disabled")
+  message(
+      "============================================================\n"
+      "-- DEBUG publishers disabled\n"
+      "============================================================\n"
+  )
 endif()
 
 if(USE_CUDA)
@@ -41,9 +49,17 @@ if(USE_CUDA)
   # Default arch for every target so CMP0104 doesn't complain about the
   # (non-CUDA) executable target that links the CUDA-enabled library.
   set(CMAKE_CUDA_ARCHITECTURES "${CUDA_CONE_FUSED_CUDA_ARCH}")
-  message(STATUS "cuda_cone_fused: GPU backend ENABLED (CUDA arch ${CUDA_CONE_FUSED_CUDA_ARCH})")
+  message(
+      "============================================================\n"
+      "-- GPU backend ENABLED (CUDA arch ${CUDA_CONE_FUSED_CUDA_ARCH})\n"
+      "============================================================\n"
+  )
 else()
-  message(STATUS "cuda_cone_fused: GPU backend disabled (CPU-only build)")
+  message(
+      "============================================================\n"
+      "-- GPU backend disabled (CPU-only build)\n"
+      "============================================================\n"
+  )
 endif()
 
 # find dependencies
