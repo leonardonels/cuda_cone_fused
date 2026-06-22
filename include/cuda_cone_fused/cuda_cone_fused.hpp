@@ -49,6 +49,8 @@ private:
   bool pub_input_cones_debug = false;
 #endif
 
+  std::string cuda_module_loading;
+
   /* Enable logging parameter */
   bool enable_logging;
 

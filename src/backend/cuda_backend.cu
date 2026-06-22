@@ -8,6 +8,7 @@
 #include <string>
 #include <cmath>
 #include <exception>
+#include <vector>
 
 using thrust::raw_pointer_cast;
 
@@ -192,6 +193,29 @@ CudaBackend::CudaBackend(int dim, int max_two_m, float inf_init)
 
     if (cudaDeviceSynchronize() != cudaSuccess) { p_->err = "init sync"; return; }
     p_->good = true;
+
+    /* Warm up the cuBLAS/cuSOLVER hot path so the first *real* scan isn't paying
+     * one-time library init (context, kernel selection, workspaces, clocks).
+     * Run one throwaway full-state update + motion step, then restore the clean
+     * initial state. good must already be true: the methods early-out otherwise. */
+    {
+        const int two_m = 2;                       /* smallest meaningful update */
+        std::vector<float> H((size_t)two_m * dim, 0.0f);
+        std::vector<float> R((size_t)two_m * two_m, 0.0f);
+        std::vector<float> nu((size_t)two_m, 0.0f);
+        H[0]  = 1.0f;                               /* touch a pose column */
+        R[0]  = 1.0f; R[3] = 1.0f;                  /* diag -> non-singular S */
+        batchUpdateFullState(dim, H.data(), R.data(), nu.data(), two_m);
+
+        const float G[9] = {1,0,0, 0,1,0, 0,0,1};
+        motionPropagate(dim, G, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+
+        /* restore P = blockdiag(I3, inf*I), x = 0 (warmup mutated resident state) */
+        int t = 256, b = (dim + t - 1) / t;
+        k_init_diag<<<b, t>>>(p_->dP(), dim, inf_init);
+        cudaMemset(p_->dx(), 0, (size_t)dim * sizeof(float));
+        if (cudaDeviceSynchronize() != cudaSuccess) { p_->err = "warmup sync"; p_->good = false; return; }
+    }
 }
 
 CudaBackend::~CudaBackend() {

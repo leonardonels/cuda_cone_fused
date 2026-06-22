@@ -25,6 +25,11 @@
       # so the raw (lap-1) vs. corrected map can be compared.
       cones_pub_for_debug: true
 
+      # force eager loading of CUDA kernels to avoid runtime kernel load latency 
+      # spikes on the first EKF update (on a 4060 laptop reduce the first
+      # iteration execution time further after the warmap phase to ~0.5ms).
+      CUDA_MODULE_LOADING: LAZY    # EAGER = load all kernels at startup, LAZY = load on first use (default)
+
       # Publish the raw input cones projected into the map frame via the
       # current EKF pose, as RED markers, to compare live observations vs. the map.
       pub_input_cones_debug: true

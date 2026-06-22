@@ -6,6 +6,8 @@ ConeFusion::ConeFusion() : rclcpp::Node("cuda_cone_fused_node") {
   /* Load node parameters */
   this->loadParameters();
 
+  setenv("CUDA_MODULE_LOADING", static_cast<const char*>(this->cuda_module_loading.c_str()), /*overwrite=*/0);  // 0 = let an explicit env var still win
+
   /* EKF SLAM filter object */
   this->ekf_odom = std::make_shared<EKFOdom>(this->meas_noise, this->proc_noise, this->min_new_cone_distance, this->eigen_threads);
   this->ekf_odom->setFreezeMap(this->freeze_map);
@@ -63,6 +65,8 @@ void ConeFusion::loadParameters() {
   declare_parameter("generic.pub_input_cones_debug", false);
 #endif
 
+  declare_parameter("generic.CUDA_MODULE_LOADING", "LAZY");
+
   /* Freeze the map from lap 2 (rigid pose-only localization) vs. continuous SLAM */
   declare_parameter("generic.freeze_map", true);
 
@@ -100,6 +104,8 @@ void ConeFusion::loadParameters() {
   get_parameter("generic.input_cones_debug_topic", this->input_cones_debug_topic);
   get_parameter("generic.pub_input_cones_debug", this->pub_input_cones_debug);
 #endif
+
+  get_parameter("generic.CUDA_MODULE_LOADING", this->cuda_module_loading);
 
   get_parameter("generic.freeze_map", this->freeze_map);
   get_parameter("generic.assoc_maha_gate", this->assoc_maha_gate);
