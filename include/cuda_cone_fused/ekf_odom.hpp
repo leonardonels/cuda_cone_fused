@@ -63,6 +63,18 @@ private:
     float q_motion_pos_ = 0.0f; /* Additive process noise on x,y per metre travelled [m^2/m]. Keeps P from collapsing so the assoc gate stays honest. 0 = off. */
     float q_motion_yaw_ = 0.0f; /* Additive process noise on theta per radian turned [rad^2/rad]. 0 = off. */
 
+    /* Warmup measurement-noise ramp (motion-gated soft handoff). While the car
+       has travelled less than warmup_ramp_m_ metres the cone measurement noise
+       is inflated (R_eff = R / alpha, alpha ramps 0->1 with distance travelled),
+       so the cones are only weakly fused at the start and the pose leans on
+       FAST-LIMO. This stops the standstill map from over-collapsing (repeated
+       same-viewpoint scans falsely shrink P as if independent) and snapping the
+       pose the instant the car moves. Because S, K and the P update are all built
+       from the SAME R_eff, this stays a consistent (partial) Kalman update —
+       unlike scaling the gain. 0 disables the ramp (full-weight cones from scan 1). */
+    float warmup_ramp_m_  = 0.0f;
+    float dist_travelled_ = 0.0f; /* accumulated |translation| from predict(), drives the ramp */
+
     /* Backend Bridge: owns the authoritative x and P (resident on the GPU for
        the CUDA peer, host Eigen for the CPU peer). The heavy joint update is
        dispatched here; there is a single code path regardless of platform. */
@@ -101,6 +113,7 @@ public:
     void setFirstLapCompleted(const bool first_lap_completed);
     void setFreezeMap(const bool enable);
     void setAssocMahaGate(const float gate);
+    void setWarmupRampM(const float meters);
 
 
     inline float euclideanDistance(float x1, float x2, float y1, float y2) {

@@ -67,6 +67,11 @@ private:
   /* Chi-square (2 DOF) gate for lap-2+ data association by Mahalanobis distance */
   double assoc_maha_gate = 9.21;
 
+  /* Warmup measurement-noise ramp distance [m]. While the car has travelled less
+     than this, cones are only weakly fused (R inflated, pose leans on FAST-LIMO)
+     to avoid the standstill map snapping the pose at motion onset. 0 = disabled. */
+  double warmup_ramp_m = 0.0;
+
   /* Eigen/OpenMP thread count for the CPU linear algebra (default 1). */
   int eigen_threads = 1;
 

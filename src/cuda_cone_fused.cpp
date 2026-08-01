@@ -12,6 +12,7 @@ ConeFusion::ConeFusion() : rclcpp::Node("cuda_cone_fused_node") {
   this->ekf_odom = std::make_shared<EKFOdom>(this->meas_noise, this->proc_noise, this->min_new_cone_distance, this->eigen_threads);
   this->ekf_odom->setFreezeMap(this->freeze_map);
   this->ekf_odom->setAssocMahaGate(static_cast<float>(this->assoc_maha_gate));
+  this->ekf_odom->setWarmupRampM(static_cast<float>(this->warmup_ramp_m));
 
   /* Inbound adapter for cones (LIMO adapter is a value member). The colour
      classification Strategy is chosen once here by the factory from params. */
@@ -73,6 +74,9 @@ void ConeFusion::loadParameters() {
   /* Chi-square (2 DOF) gate for lap-2+ Mahalanobis data association */
   declare_parameter("generic.assoc_maha_gate", 9.21);
 
+  /* Warmup measurement-noise ramp distance [m] (0 = disabled). */
+  declare_parameter("generic.warmup_ramp_m", 0.0);
+
   /* Eigen/OpenMP thread count for the CPU linear algebra (default 1). */
   declare_parameter("generic.eigen_threads", 1);
 
@@ -109,6 +113,7 @@ void ConeFusion::loadParameters() {
 
   get_parameter("generic.freeze_map", this->freeze_map);
   get_parameter("generic.assoc_maha_gate", this->assoc_maha_gate);
+  get_parameter("generic.warmup_ramp_m", this->warmup_ramp_m);
   get_parameter("generic.eigen_threads", this->eigen_threads);
   get_parameter("generic.late_arrival_window_ms", this->late_arrival_window_ms);
   this->late_arrival_window_ns =

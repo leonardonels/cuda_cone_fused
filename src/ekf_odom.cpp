@@ -86,6 +86,26 @@ size_t EKFOdom::update(const std::vector<Observation>& obs) {
     std::vector<std::pair<size_t, Vector2f>> batch_obs;
     batch_obs.reserve(obs.size());
 
+    /* Warmup measurement-noise ramp: inflate R while the car has travelled less
+       than warmup_ramp_m_ (R_eff = R / alpha, alpha ramping 0->1 with distance),
+       so early cones are only weakly fused and the pose leans on FAST-LIMO. This
+       prevents the standstill map from over-collapsing and snapping the pose at
+       motion onset. alpha is floored (not zeroed) so mapping still proceeds:
+       landmarks are created/observed but the covariance barely shrinks until the
+       car has moved a real baseline. R_eff is used everywhere R would be (the
+       Mahalanobis gate S and the batch update R), keeping the update consistent.
+       warmup_ramp_m_ == 0 disables it (R_eff == R). By lap 2 the car has long
+       since travelled past the ramp, so alpha == 1 and this is a no-op. */
+    Matrix2f R_eff = this->R_;
+    if (this->warmup_ramp_m_ > 0.0f)
+    {
+        constexpr float ALPHA_FLOOR = 1e-3f;  /* R_eff <= 1000*R at standstill */
+        float alpha = this->dist_travelled_ / this->warmup_ramp_m_;
+        if (alpha < ALPHA_FLOOR) alpha = ALPHA_FLOOR;
+        if (alpha > 1.0f)        alpha = 1.0f;
+        R_eff = this->R_ / alpha;
+    }
+
     for (const auto& o : obs)
     {
         const Vector3f& z = o.z;
@@ -140,7 +160,7 @@ size_t EKFOdom::update(const std::vector<Observation>& obs) {
             Hp << -sqd*dlt(0), -sqd*dlt(1),  0.0f,
                       dlt(1),     -dlt(0),    -qd;
             Hp /= qd;
-            Matrix2f S = (Hp * this->P_pose_ * Hp.transpose()) + this->R_;
+            Matrix2f S = (Hp * this->P_pose_ * Hp.transpose()) + R_eff;
 
             const float d2 = nu.transpose() * S.inverse() * nu;
             if (d2 > this->assoc_maha_gate_)
@@ -239,7 +259,7 @@ size_t EKFOdom::update(const std::vector<Observation>& obs) {
     for (size_t r = 0; r < m; r++)
     {
         nu_all.segment(2*r, 2)  = ups[r].nu;
-        R.block(2*r, 2*r, 2, 2) = this->R_;
+        R.block(2*r, 2*r, 2, 2) = R_eff;
     }
 
     if (!(this->is_first_lap_completed && this->freeze_map_))
@@ -336,6 +356,10 @@ void EKFOdom::setAssocMahaGate(const float gate)
 {
     this->assoc_maha_gate_ = gate;
 }
+void EKFOdom::setWarmupRampM(const float meters)
+{
+    this->warmup_ramp_m_ = (meters > 0.0f) ? meters : 0.0f;
+}
 
 void EKFOdom::predict(const MotionIncrement& inc)
 {
@@ -368,6 +392,11 @@ void EKFOdom::predict(const MotionIncrement& inc)
        error actually accumulates and is zero when the car is stopped. This is a
        MOTION-MODEL property of the filter, not an adapter concern. */
     const float dtrans = std::sqrt(local_dx*local_dx + local_dy*local_dy);
+
+    /* Accumulate travelled distance for the warmup measurement-noise ramp
+       (see update() / warmup_ramp_m_). */
+    this->dist_travelled_ += dtrans;
+
     const float add_xx  = this->q_motion_pos_ * dtrans;
     const float add_yy  = this->q_motion_pos_ * dtrans;
     const float add_yaw = this->q_motion_yaw_ * std::fabs(dtheta);

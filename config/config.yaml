@@ -13,7 +13,7 @@
       mapped_cones_topic: "/slam/cones_positions"
       output_odom_topic: "/Odometry"
 
-      enable_logging: true
+      enable_logging: false
       cone_time_seen_th: 10
 
       # --- DEBUG-only parameters -------------------------------------------
@@ -28,7 +28,7 @@
       # force eager loading of CUDA kernels to avoid runtime kernel load latency 
       # spikes on the first EKF update (on a 4060 laptop reduce the first
       # iteration execution time further after the warmap phase to ~0.5ms).
-      CUDA_MODULE_LOADING: LAZY    # EAGER = load all kernels at startup, LAZY = load on first use (default)
+      CUDA_MODULE_LOADING: EAGER    # EAGER = load all kernels at startup, LAZY = load on first use (default)
 
       # Publish the raw input cones projected into the map frame via the
       # current EKF pose, as RED markers, to compare live observations vs. the map.
@@ -60,6 +60,18 @@
       # to keep correcting under larger drift; lower to reject more aggressively.
       assoc_maha_gate: 13.8
 
+      # Warmup measurement-noise ramp distance [m]. Until the car has travelled
+      # this far, cone measurements are inflated (R_eff = R / alpha, alpha ramps
+      # 0->1 with distance travelled) so early cones are only weakly fused and the
+      # pose leans on FAST-LIMO. Fixes the standstill-map snap at motion onset: a
+      # stationary car re-observing the same cones falsely collapses P (correlated
+      # detection error treated as independent), and the overconfident map yanks
+      # the pose (and rotates it) the instant the car moves. The map is still built
+      # during warmup (landmark means set), only its covariance is kept from
+      # collapsing. Consistent soft handoff (S, K, P all use R_eff), no snap at the
+      # transition. Set ~ a car length or two (e.g. 2.0-5.0). 0 = disabled.
+      warmup_ramp_m: 3.0
+
       # Eigen/OpenMP threads for the CPU linear algebra. Default 1: at these
       # matrix sizes multithreaded GEMM mostly adds fork/join jitter (p99 latency
       # blows up at 6 threads on the Orin's 6-core SoC). With the GPU backend
@@ -82,7 +94,7 @@
       # Measurement noise R: (range, bearing) VARIANCES used directly on the
       # diagonal of R (not squared internally), i.e. [var_range [m^2],
       # var_bearing [rad^2]] — not standard deviations.
-      meas_noise:  [0.7, 0.3]
+      meas_noise:  [0.7, 0.3]  # [m^2, rad^2]
 
       # Process noise Q (the Q of the predict step), added to the pose
       # covariance each step proportional to motion: [pos per metre travelled
@@ -93,4 +105,4 @@
       # if the pose gets jittery. [0.0, 0.0] disables it.
       proc_noise: [0.05, 0.02]
 
-      min_new_cone_distance: 1.7          # Minimum distance to create new cone
+      min_new_cone_distance: 2.25          # Minimum distance to create new cone
