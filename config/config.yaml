@@ -60,6 +60,23 @@
       # to keep correcting under larger drift; lower to reject more aggressively.
       assoc_maha_gate: 13.8
 
+      # Hold the filter back for the whole of FAST-LIMO's IMU calibration
+      # (its `calibration.time`, 3 s by default). While calibrating, LIMO's
+      # getWorldState() returns a default-constructed State with an all-zero
+      # covariance, so /fast_limo/state carries a frozen placeholder — origin,
+      # identity attitude, zero covariance — not odometry. With this true:
+      #   - those frames are dropped and do NOT seed the relative-motion
+      #     reference, so the calibration-end discontinuity (gravity re-anchor
+      #     of the attitude + covariance 0 -> I) never enters a delta. That
+      #     discontinuity is what inflates the pose covariance by a full 1.0 on
+      #     x/y/yaw and makes the next cone scan snap the pose;
+      #   - cone scans are dropped too and NO cone map is published, so the
+      #     planner cannot build a trajectory and the car stays still — which is
+      #     the standstill the IMU calibration assumes.
+      # Detection is by signature, not by a timer, so it follows whatever
+      # `calibration.time` LIMO runs with. false = legacy (consume everything).
+      gate_on_limo_calibration: true
+
       # Eigen/OpenMP threads for the CPU linear algebra. Default 1: at these
       # matrix sizes multithreaded GEMM mostly adds fork/join jitter (p99 latency
       # blows up at 6 threads on the Orin's 6-core SoC). With the GPU backend

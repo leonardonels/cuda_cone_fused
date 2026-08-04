@@ -67,6 +67,11 @@ private:
   /* Chi-square (2 DOF) gate for lap-2+ data association by Mahalanobis distance */
   double assoc_maha_gate = 9.21;
 
+  /* If true (default), hold the filter back until FAST-LIMO has finished its IMU
+     calibration: its motion frames are dropped by the adapter and cone scans are
+     dropped here, so no cone map is published for the duration. */
+  bool gate_on_limo_calibration = true;
+
   /* Eigen/OpenMP thread count for the CPU linear algebra (default 1). */
   int eigen_threads = 1;
 

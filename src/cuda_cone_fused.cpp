@@ -13,6 +13,11 @@ ConeFusion::ConeFusion() : rclcpp::Node("cuda_cone_fused_node") {
   this->ekf_odom->setFreezeMap(this->freeze_map);
   this->ekf_odom->setAssocMahaGate(static_cast<float>(this->assoc_maha_gate));
 
+  /* Arm (or disable) the FAST-LIMO IMU-calibration gate. The adapter detects the
+     calibration by the signature of the frames LIMO publishes, so no timer here
+     has to agree with LIMO's `calibration.time`. */
+  this->limo_adapter_.setGateOnCalibration(this->gate_on_limo_calibration);
+
   /* Inbound adapter for cones (LIMO adapter is a value member). The colour
      classification Strategy is chosen once here by the factory from params. */
   this->cone_adapter_ =
@@ -73,6 +78,9 @@ void ConeFusion::loadParameters() {
   /* Chi-square (2 DOF) gate for lap-2+ Mahalanobis data association */
   declare_parameter("generic.assoc_maha_gate", 9.21);
 
+  /* Hold the filter back for the duration of FAST-LIMO's IMU calibration */
+  declare_parameter("generic.gate_on_limo_calibration", true);
+
   /* Eigen/OpenMP thread count for the CPU linear algebra (default 1). */
   declare_parameter("generic.eigen_threads", 1);
 
@@ -109,6 +117,7 @@ void ConeFusion::loadParameters() {
 
   get_parameter("generic.freeze_map", this->freeze_map);
   get_parameter("generic.assoc_maha_gate", this->assoc_maha_gate);
+  get_parameter("generic.gate_on_limo_calibration", this->gate_on_limo_calibration);
   get_parameter("generic.eigen_threads", this->eigen_threads);
   get_parameter("generic.late_arrival_window_ms", this->late_arrival_window_ms);
   this->late_arrival_window_ns =
@@ -139,6 +148,23 @@ CommandQueue::DrainResult ConeFusion::drainQueue() {
 
 void ConeFusion::conesCallback(const visualization_msgs::msg::Marker::SharedPtr cones_data)
 {
+  /* FAST-LIMO IMU-calibration gate. Until LIMO is calibrated its pose is a
+     frozen placeholder (see LimoMotionAdapter::convert), so the scan is DROPPED
+     outright rather than merely withheld from the output: fusing it would seed
+     the landmark means, the colour votes and the cone_time_seen_th counters from
+     a pose that is meaningless and about to be re-anchored to gravity, leaving a
+     doubled/smeared map once the real pose arrives.
+
+     Publishing nothing is also the point, not a side effect: with no cone map
+     the planner cannot produce a trajectory, so the car stays put — which is
+     exactly the standstill LIMO's IMU calibration assumes. */
+  if (this->gate_on_limo_calibration && !this->limo_adapter_.isCalibrated()) {
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                         "FAST-LIMO still calibrating: dropping cone scans and "
+                         "withholding the cone map");
+    return;
+  }
+
   /* Translate the transient vehicle-frame observations into a domain Command and
      enqueue it (cones = MAIN correction input). */
   const size_t detected_cones = cones_data->points.size();
@@ -202,7 +228,17 @@ void ConeFusion::fastLimoDataCallback(const nav_msgs::msg::Odometry::SharedPtr f
                 fast_limo_data->child_frame_id.c_str(), this->input_odom_topic.c_str());
   }
 
+  /* The adapter returns nullopt for every frame published during LIMO's IMU
+     calibration and latches `isCalibrated()` on the first real one; announce
+     that transition once, since it is what releases the cone map. */
+  const bool was_calibrated = this->limo_adapter_.isCalibrated();
   std::optional<MotionIncrement> inc = this->limo_adapter_.convert(*fast_limo_data);
+  if (!was_calibrated && this->limo_adapter_.isCalibrated()) {
+    RCLCPP_INFO(this->get_logger(),
+                "FAST-LIMO calibration complete: consuming odometry from %s and "
+                "publishing the cone map",
+                this->input_odom_topic.c_str());
+  }
   if (inc) {
     this->cmd_queue_.push(FilterCommand::makePredict(*inc));
   }

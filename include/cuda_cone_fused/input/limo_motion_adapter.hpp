@@ -23,14 +23,71 @@
  * LIMO since the previous frame (expressed in the previous LIMO body frame), not
  * an absolute pose. EKFOdom rotates that into the EKF frame by its own heading
  * and composes it onto the cone-corrected mean.
+ *
+ * It also owns the FAST-LIMO IMU-CALIBRATION GATE (see convert()): the frames
+ * LIMO publishes while it is still calibrating are a frozen placeholder, not
+ * odometry, and are dropped here rather than fed to the filter.
  */
 class LimoMotionAdapter {
 public:
   /**
-   * @return the increment for this frame, or std::nullopt on the very first
-   *         frame (which only seeds the reference — there is no motion yet).
+   * Enable/disable the FAST-LIMO IMU-calibration gate (enabled by default).
+   * Disabling it declares the source calibrated from the first frame, i.e. the
+   * legacy behaviour of consuming every frame LIMO publishes.
+   */
+  void setGateOnCalibration(bool enable) {
+    gate_on_calibration_ = enable;
+    if (!enable) calibrated_ = true;
+  }
+
+  /**
+   * True once FAST-LIMO has finished its IMU calibration and is publishing a
+   * real state (always true when the gate is disabled). The node uses this to
+   * withhold the cone map for the duration of the calibration.
+   */
+  bool isCalibrated() const { return calibrated_; }
+
+  /**
+   * @return the increment for this frame, or std::nullopt while FAST-LIMO is
+   *         still calibrating and on the first calibrated frame (which only
+   *         seeds the reference — there is no motion yet).
    */
   std::optional<MotionIncrement> convert(const nav_msgs::msg::Odometry& msg) {
+    /* ---- FAST-LIMO IMU-calibration gate ---------------------------------
+       While FAST-LIMO calibrates the IMU (its `calibration.time`, 3 s by
+       default) Localizer::getWorldState() returns a DEFAULT-CONSTRUCTED State
+       and getPoseCovariance() returns 36 zeros, so what reaches this topic is a
+       frozen placeholder: position exactly (0,0,0), orientation exactly
+       identity, covariance exactly 0. That is not odometry, and feeding it to
+       the filter breaks the start-up in two distinct ways:
+
+         - the frozen pose makes every increment 0 while the car may already be
+           rolling, so the EKF pose stays pinned at the origin while the cone
+           observations sweep past it (input cones drifting one way while the
+           odometry has not started moving yet);
+
+         - at the instant calibration ends LIMO re-anchors its attitude to the
+           estimated gravity vector AND sets its covariance to identity
+           (init_iKFoM_state: `init_P.setIdentity()`). Read as a relative
+           motion that single frame is a one-shot yaw step plus a full 1.0
+           variance injection on x/y/yaw; the inflated pose covariance blows the
+           Kalman gain up on the very next cone scan and the pose SNAPS.
+
+       So drop these frames entirely and do NOT seed the reference from them:
+       the first CALIBRATED frame becomes the reference, which puts the
+       calibration-end discontinuity outside every delta we ever compute.
+
+       Detection is by signature, not by a hardcoded 3 s timer, so it follows
+       whatever `calibration.time` LIMO is configured with (including a runtime
+       change or a LIMO restart). The signature is unambiguous: a calibrated
+       LIMO reports a covariance that starts at 1.0 and never returns to
+       exactly zero. The latch is one-way, mirroring LIMO's own
+       `imu_calibrated_` flag. */
+    if (!calibrated_) {
+      if (isUncalibratedFrame(msg)) return std::nullopt;
+      calibrated_ = true;
+    }
+
     tf2::Quaternion q;
     q.setX(msg.pose.pose.orientation.x);
     q.setY(msg.pose.pose.orientation.y);
@@ -94,7 +151,27 @@ private:
     return angle;
   }
 
+  /* Signature of a frame published while FAST-LIMO is still calibrating: the
+     default-constructed State (origin + identity attitude) carried alongside an
+     all-zero covariance. The exact-zero comparisons are deliberate — these are
+     literal defaults that were never computed, not values that merely round to
+     zero, and LIMO's covariance is >= 1.0 from the first calibrated frame on. */
+  static bool isUncalibratedFrame(const nav_msgs::msg::Odometry& msg) {
+    const auto& p = msg.pose.pose.position;
+    const auto& o = msg.pose.pose.orientation;
+    return p.x == 0.0 && p.y == 0.0 && p.z == 0.0 &&
+           o.x == 0.0 && o.y == 0.0 && o.z == 0.0 && o.w == 1.0 &&
+           msg.pose.covariance.at(0)  == 0.0 &&
+           msg.pose.covariance.at(7)  == 0.0 &&
+           msg.pose.covariance.at(35) == 0.0;
+  }
+
   Eigen::Vector3f prev_pose_ = Eigen::Vector3f::Zero();
   Eigen::Vector3f prev_cov_  = Eigen::Vector3f::Zero();
   bool initialized_ = false;
+
+  /* One-way latch: set on the first frame that is not the calibration
+     placeholder (or up front when the gate is disabled). */
+  bool calibrated_ = false;
+  bool gate_on_calibration_ = true;
 };
