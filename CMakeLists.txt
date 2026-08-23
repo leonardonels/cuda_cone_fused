@@ -26,6 +26,23 @@ option(USE_CUDA "Build the resident-state GPU EKF backend (needs CUDA toolkit)" 
 set(CUDA_CONE_FUSED_CUDA_ARCH "87" CACHE STRING "CUDA arch for the GPU backend (Orin = 87)")
 
 # ----------------------------------------------------------------------------
+# Per-frame latency instrumentation: one mmr_base/LatencySample per processed
+# frame on /latency/sample/cone_fused. OFF by default, and env-var driven like
+# ENABLE_ZERO_COPY / ENABLE_BARQ elsewhere in this workspace, so that
+# `LATENCY_TESTING=1 colcon build` instruments the whole stack at once.
+# ----------------------------------------------------------------------------
+option(LATENCY_TESTING "Publish per-frame latency samples on /latency/sample/<key>" OFF)
+if($ENV{LATENCY_TESTING})
+  set(LATENCY_TESTING ON)
+endif()
+if(LATENCY_TESTING)
+  message(STATUS "Latency testing: ENABLED -- samples on /latency/sample/cone_fused")
+  add_definitions(-DLATENCY_TESTING)
+else()
+  message(STATUS "Latency testing: DISABLED")
+endif()
+
+# ----------------------------------------------------------------------------
 # Optional debug outputs: prints and topics. OFF by Default.
 # ----------------------------------------------------------------------------
 option(DEBUG "Compile in the debug-only cone publishers/topics" OFF)

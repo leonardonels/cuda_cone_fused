@@ -60,8 +60,57 @@ private:
 
     float assoc_maha_gate_ = 9.21f; /* chi-square (2 DOF) gate for lap-2+ data association by Mahalanobis distance */
 
+    /* LAP-1 new-vs-existing gate, P-SCALED. The lap-1 radius used to be the
+       fixed max_new_cone_dist, which is the one gate in the filter that does NOT
+       widen with uncertainty — and lap 1 is the lap that BUILDS the map. Once
+       the pose error exceeded that radius the filter concluded "new cone"
+       instead of "I am uncertain": the duplicate went in with INF covariance
+       (contributing no correction) and the real landmark that should have
+       corrected the pose was never used, so the correction was withheld exactly
+       when it was needed most and the drift ran away on its own. The effective
+       radius is now
+           r = clamp(max_new_cone_dist + k * sigma_pose, ..., new_cone_dist_cap_)
+       with sigma_pose = sqrt(max(Pxx, Pyy)), so it widens with the pose
+       uncertainty the same way the lap-2+ Mahalanobis gate does. The cap keeps
+       it below the physical cone spacing so a diverged P can never merge two
+       distinct cones. (A full Mahalanobis gate is not used here: a fresh
+       landmark carries INF covariance and the host mirror only holds the pose
+       block, so the pose-only S would be optimistic exactly where the map is
+       still immature.) */
+    float new_cone_sigma_scale_ = 3.0f; /* k: pose-sigma multiplier added to the lap-1 radius. 0 = fixed radius (old behaviour). */
+    float new_cone_dist_cap_ = 4.0f;    /* absolute cap [m] on the widened lap-1 radius; must stay below the real cone spacing. */
+
     float q_motion_pos_ = 0.0f; /* Additive process noise on x,y per metre travelled [m^2/m]. Keeps P from collapsing so the assoc gate stays honest. 0 = off. */
     float q_motion_yaw_ = 0.0f; /* Additive process noise on theta per radian turned [rad^2/rad]. 0 = off. */
+
+public:
+    /* Per-scan data-association diagnostics, refreshed by every update().
+       Read by the ROS node for the correction-health log; the filter itself is
+       ROS-free, so it counts here and logs nowhere. */
+    struct AssocStats
+    {
+        size_t observed = 0;      /* observations considered (after the orange-cone filter) */
+        size_t associated = 0;    /* passed association and entered the batch update */
+        size_t created = 0;       /* new landmarks allocated this scan (lap 1 only) */
+        size_t dropped_gate = 0;  /* lap 2+: failed the Mahalanobis gate */
+        size_t dropped_full = 0;  /* dropped because the map hit N_CONES (the cliff) */
+        float nn_max = 0.0f;      /* max nearest-neighbour distance [m] over this scan */
+        float nn_mean = 0.0f;     /* mean nearest-neighbour distance [m] over this scan */
+        float gate_radius = 0.0f; /* lap-1 effective new-cone radius [m] used this scan */
+
+        /* Nearest-neighbour distance AT THE MOMENT OF CREATION, over the
+           landmarks created this scan (only counted once the map is non-empty,
+           so the very first cones do not register a meaningless FLT_MAX).
+           This is what separates a duplicate from a genuinely new cone: a real
+           new cone appears at the physical cone spacing from anything already
+           mapped (>= ~3 m), a duplicate appears just outside the gate radius.
+           The histogram of these over a run is what sets the right radius. */
+        float new_nn_min = 0.0f;
+        float new_nn_max = 0.0f;
+    };
+
+private:
+    AssocStats assoc_stats_;
 
     /* Backend Bridge: owns the authoritative x and P (resident on the GPU for
        the CUDA peer, host Eigen for the CPU peer). The heavy joint update is
@@ -101,6 +150,13 @@ public:
     void setFirstLapCompleted(const bool first_lap_completed);
     void setFreezeMap(const bool enable);
     void setAssocMahaGate(const float gate);
+    void setNewConeGate(const float sigma_scale, const float dist_cap);
+
+    /* Data-association diagnostics from the most recent update(). */
+    const AssocStats& getAssocStats() const { return this->assoc_stats_; }
+
+    /* Landmark capacity, so callers can report headroom against the cliff. */
+    static constexpr size_t landmarkCapacity() { return N_CONES; }
 
 
     inline float euclideanDistance(float x1, float x2, float y1, float y2) {

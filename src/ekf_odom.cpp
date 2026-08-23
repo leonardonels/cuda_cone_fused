@@ -1,7 +1,9 @@
 #include <cuda_cone_fused/ekf_odom.hpp>
 
 #include <omp.h>
+#include <algorithm>
 #include <cfloat>
+#include <cmath>
 #include <utility>
 #include <vector>
 
@@ -81,6 +83,25 @@ size_t EKFOdom::update(const std::vector<Observation>& obs) {
     size_t associated = 0;
     Vector2f tmp_cone;
 
+    /* Reset the per-scan association diagnostics (see AssocStats). */
+    this->assoc_stats_ = AssocStats{};
+    double nn_sum = 0.0;
+    size_t nn_samples = 0;   /* observations that HAD a nearest neighbour to measure against */
+
+    /* LAP-1 effective new-vs-existing radius for this scan: the configured
+       floor widened by the current pose uncertainty and capped below the
+       physical cone spacing. Computed ONCE per scan (P does not change inside
+       the association loop) — see the comment on new_cone_sigma_scale_. */
+    const float pose_sigma = std::sqrt(std::max(0.0f,
+                                 std::max(this->P_pose_(0,0), this->P_pose_(1,1))));
+    float new_cone_radius = this->max_new_cone_dist
+                          + this->new_cone_sigma_scale_ * pose_sigma;
+    if (new_cone_radius > this->new_cone_dist_cap_)
+        new_cone_radius = this->new_cone_dist_cap_;
+    if (new_cone_radius < this->max_new_cone_dist)
+        new_cone_radius = this->max_new_cone_dist;   /* cap below the floor: floor wins */
+    this->assoc_stats_.gate_radius = new_cone_radius;
+
     /* Associations collected this scan for the joint (batch) update:
        (landmark index k, observed (range, bearing)). */
     std::vector<std::pair<size_t, Vector2f>> batch_obs;
@@ -115,6 +136,20 @@ size_t EKFOdom::update(const std::vector<Observation>& obs) {
             }
         }
 
+        this->assoc_stats_.observed++;
+        if (this->landmark_count > 0)
+        {
+            /* Nearest-neighbour offset: how far the observation projected through
+               the CURRENT pose lands from the map. This IS the association-level
+               innovation (the red-vs-yellow offset on /slam/input_cones_debug).
+               Its distribution against the lap-1 radius is the confirmation
+               measurement — log it per scan and take the p95 offline. */
+            nn_sum += min_dist;
+            nn_samples++;
+            if (min_dist > this->assoc_stats_.nn_max)
+                this->assoc_stats_.nn_max = min_dist;
+        }
+
         if (this->is_first_lap_completed)
         {
             /* LAP 2+: associate by MAHALANOBIS distance (adaptive to the pose
@@ -145,27 +180,48 @@ size_t EKFOdom::update(const std::vector<Observation>& obs) {
             const float d2 = nu.transpose() * S.inverse() * nu;
             if (d2 > this->assoc_maha_gate_)
             {
+                this->assoc_stats_.dropped_gate++;
                 continue;   /* not consistent with the nearest landmark -> drop */
             }
             this->s_(k).setColor(static_cast<uint32_t>(z(2)));
         }
         else
         {
-            /* LAP 1: build the map with Euclidean nearest-neighbour + a fixed
-               radius (the map/pose covariance is still immature, so a metric gate
-               is simpler and robust for the new-vs-existing decision). */
-            if (this->max_new_cone_dist < min_dist)
+            /* LAP 1: build the map with Euclidean nearest-neighbour against a
+               P-SCALED radius. The metric form is kept (the map covariance is
+               still immature, so a full Mahalanobis gate would be optimistic
+               here) but the radius now widens with the pose uncertainty, which
+               is what stops the "far from the map" -> "must be a new cone" ->
+               "no correction" -> "drift further" loop from closing. See
+               new_cone_sigma_scale_. */
+            if (new_cone_radius < min_dist)
             {
                 /* New cone */
                 if (this->landmark_count >= N_CONES)
                 {
                     /* Map is full: allocating another landmark would overrun the
                        fixed-size state (x_), backend P/x, and signature (s_)
-                       buffers, all sized for N_CONES. Drop the observation. */
+                       buffers, all sized for N_CONES. Drop the observation.
+                       This is a CLIFF, not a graceful degradation: from here on
+                       EVERY further observation is dropped, including all the
+                       good ones, and the filter goes permanently blind. The
+                       counter below is what makes the node say so out loud. */
+                    this->assoc_stats_.dropped_full++;
                     continue;
+                }
+                if (this->landmark_count > 0)
+                {
+                    /* Record how far this "new" cone landed from the nearest
+                       thing already on the map (see AssocStats::new_nn_min). */
+                    if (this->assoc_stats_.created == 0 ||
+                        min_dist < this->assoc_stats_.new_nn_min)
+                        this->assoc_stats_.new_nn_min = min_dist;
+                    if (min_dist > this->assoc_stats_.new_nn_max)
+                        this->assoc_stats_.new_nn_max = min_dist;
                 }
                 k = this->landmark_count;
                 this->landmark_count++;
+                this->assoc_stats_.created++;
                 this->x_.segment(3 + (2*k), 2) = tmp_cone;
                 /* Mirror the new landmark mean onto the authoritative backend
                    state. Its covariance is already INF there (pre-initialised). */
@@ -184,6 +240,11 @@ size_t EKFOdom::update(const std::vector<Observation>& obs) {
         associated++;   /* reached only by observations that passed association */
         batch_obs.emplace_back(k, Vector2f(z(0), z(1)));
     }
+
+    this->assoc_stats_.associated = associated;
+    if (nn_samples > 0)
+        this->assoc_stats_.nn_mean =
+            static_cast<float>(nn_sum / static_cast<double>(nn_samples));
 
     /* ---- Batch (joint) measurement update --------------------------------
        Fuse ALL cones associated this scan in a single joint EKF update instead
@@ -335,6 +396,11 @@ void EKFOdom::setFreezeMap(const bool enable)
 void EKFOdom::setAssocMahaGate(const float gate)
 {
     this->assoc_maha_gate_ = gate;
+}
+void EKFOdom::setNewConeGate(const float sigma_scale, const float dist_cap)
+{
+    this->new_cone_sigma_scale_ = (sigma_scale > 0.0f) ? sigma_scale : 0.0f;
+    this->new_cone_dist_cap_ = dist_cap;
 }
 
 void EKFOdom::predict(const MotionIncrement& inc)

@@ -110,4 +110,22 @@
       # if the pose gets jittery. [0.0, 0.0] disables it.
       proc_noise: [0.05, 0.02]
 
-      min_new_cone_distance: 1.7          # Minimum distance to create new cone
+      # New-vs-existing cone decision on LAP 1 (the lap that BUILDS the map).
+      # The effective radius is
+      #     r = clamp(min_new_cone_distance + new_cone_sigma_scale * sigma_pose,
+      #               min_new_cone_distance, max_new_cone_distance)
+      # with sigma_pose = sqrt(max(Pxx, Pyy)). Anything nearer than r is an
+      # EXISTING cone, anything further allocates a new landmark.
+      #
+      # What the scaling is for: it is an ANTI-RUNAWAY NET, and at 0.5/2.50 it
+      # is inert in normal operation (sigma_pose ~0.3 m -> r ~1.85 m, and the
+      # run above is indistinguishable from the fixed 1.7). It only opens up
+      # when P actually grows, which is the case a fixed radius handles worst:
+      # pose error past the radius makes the filter conclude "new cone" rather
+      # than "I am uncertain", the duplicate goes in with INF covariance and
+      # contributes no correction, so the correction is withheld exactly when it
+      # is needed most. The cap keeps it below the physical cone spacing so the
+      # net can never merge two distinct cones. 0.0 restores the old fixed radius.
+      min_new_cone_distance: 1.7          # [m] floor, and what the filter uses in normal operation.
+      new_cone_sigma_scale: 0.5           # [-] pose sigmas added to the floor. 0 = fixed radius (pre-cremona-2026-07-28 behaviour).
+      max_new_cone_distance: 2.5          # [m] hard cap on the widened radius, below the physical cone spacing.
