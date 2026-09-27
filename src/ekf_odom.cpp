@@ -160,7 +160,7 @@ size_t EKFOdom::update(const std::vector<Observation>& obs) {
                correcting. The map is frozen here, so a cone that fails the gate is
                simply discarded (no new landmarks after lap 1). This is the single
                gating point for lap 2+ — the update steps below no longer re-gate. */
-            Vector2f dlt = this->x_.segment(3 + 2*k, 2) - Vector2f(this->x_(0), this->x_(1));
+            Vector2f dlt = this->x_.segment<2>(3 + 2*k) - Vector2f(this->x_(0), this->x_(1));
             float qd = dlt.transpose() * dlt;
             qd = (qd == 0.0f) ? FLT_MIN : qd;
             const float sqd = sqrt(qd);
@@ -222,7 +222,7 @@ size_t EKFOdom::update(const std::vector<Observation>& obs) {
                 k = this->landmark_count;
                 this->landmark_count++;
                 this->assoc_stats_.created++;
-                this->x_.segment(3 + (2*k), 2) = tmp_cone;
+                this->x_.segment<2>(3 + (2*k)) = tmp_cone;
                 /* Mirror the new landmark mean onto the authoritative backend
                    state. Its covariance is already INF there (pre-initialised). */
                 this->backend_->insertLandmark(static_cast<int>(k), tmp_cone(0), tmp_cone(1));
@@ -268,7 +268,7 @@ size_t EKFOdom::update(const std::vector<Observation>& obs) {
     {
         const size_t kk = ob.first;
 
-        Vector2f d = this->x_.segment(3 + 2*kk, 2) - Vector2f(this->x_(0), this->x_(1));
+        Vector2f d = this->x_.segment<2>(3 + 2*kk) - Vector2f(this->x_(0), this->x_(1));
         float q = d.transpose() * d;
         q = (q == 0.0f) ? FLT_MIN : q;
         const float sq = sqrt(q);
@@ -299,7 +299,7 @@ size_t EKFOdom::update(const std::vector<Observation>& obs) {
     MatrixXf R      = MatrixXf::Zero(2*m, 2*m);
     for (size_t r = 0; r < m; r++)
     {
-        nu_all.segment(2*r, 2)  = ups[r].nu;
+        nu_all.segment<2>(2*r)  = ups[r].nu;
         R.block(2*r, 2*r, 2, 2) = this->R_;
     }
 
